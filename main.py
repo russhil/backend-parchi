@@ -20,6 +20,7 @@ from database import (
     get_patient,
     get_all_patients,
     search_patients,
+    create_patient,
     get_appointments_for_patient,
     get_todays_appointments,
     get_all_appointments,
@@ -54,7 +55,10 @@ from prompts import (
     SUMMARY_ONSET_PROMPT,
     SUMMARY_SEVERITY_PROMPT,
     SUMMARY_FINDINGS_PROMPT,
+
     SUMMARY_CONTEXT_PROMPT,
+    SEARCH_CANDIDATES_PROMPT,
+    SEARCH_REASONING_PROMPT,
 )
 
 load_dotenv()
@@ -126,6 +130,21 @@ class NoteRequest(BaseModel):
 
 class MarkSeenRequest(BaseModel):
     appointment_id: str
+
+
+class PatientRequest(BaseModel):
+    name: str
+    age: int | None = None
+    gender: str | None = None
+    phone: str | None = None
+    email: str | None = None
+    address: str | None = None
+    height_cm: float | None = None
+    weight_kg: float | None = None
+    conditions: list[str] = []
+    medications: list[str] = []
+    allergies: list[str] = []
+    vitals: dict = {}
 
 
 # --- Helper Functions ---
@@ -228,41 +247,175 @@ def get_patient_details(patient_id: str):
     }
 
 
+@app.post("/patients")
+def create_new_patient(req: PatientRequest):
+    """Create a new patient."""
+    patient_id = f"p-{uuid.uuid4().hex[:8]}"
+    
+    patient_data = {
+        "id": patient_id,
+        "name": req.name,
+    }
+    
+    # Add optional fields if provided
+    if req.age is not None:
+        patient_data["age"] = req.age
+    if req.gender:
+        patient_data["gender"] = req.gender
+    if req.height_cm is not None:
+        patient_data["height_cm"] = req.height_cm
+    if req.weight_kg is not None:
+        patient_data["weight_kg"] = req.weight_kg
+    if req.conditions:
+        patient_data["conditions"] = req.conditions
+    if req.medications:
+        patient_data["medications"] = req.medications
+    if req.allergies:
+        patient_data["allergies"] = req.allergies
+    if req.vitals:
+        patient_data["vitals"] = req.vitals
+    
+    patient = create_patient(patient_data)
+    return {"patient": patient}
+
 # --- Routes: Search ---
 
 
 @app.post("/search")
-def search(req: SearchRequest):
-    """Search across patient data, documents, visit notes."""
+async def search(req: SearchRequest):
+    """
+    AI-powered search across all patient data.
+    1. Feeds patient summaries to AI to find matches.
+    2. Asks AI for relevance reason for each match.
+    """
     query = req.query.strip()
     if not query:
         return {"results": []}
 
-    results = search_patients(query)
-
-    # Also search in documents
+    # 1. Fetch all patients and build context
     all_patients = get_all_patients()
-    for patient in all_patients:
-        doc_matches = search_documents(patient["id"], query)
-        if doc_matches:
-            # Check if patient already in results
-            existing = next((r for r in results if r["patient_id"] == patient["id"]), None)
-            if existing:
-                for dm in doc_matches:
-                    existing["matched_snippets"].append(dm["snippet"])
-            else:
-                results.append({
-                    "patient_id": patient["id"],
-                    "patient_name": patient["name"],
-                    "matched_snippets": [dm["snippet"] for dm in doc_matches],
-                })
+    if not all_patients:
+        return {"results": []}
 
-    if not results:
-        results.append({
-            "patient_id": "",
-            "patient_name": "",
-            "matched_snippets": [f'No results found for "{query}"'],
-        })
+    # Fetch appointments to include in context
+    all_appointments = get_all_appointments()
+    appt_map = {}
+    for appt in all_appointments:
+        pid = appt.get("patient_id")
+        if pid not in appt_map:
+            appt_map[pid] = []
+        
+        # Format: Date: Reason (Status)
+        try:
+            date_str = appt.get("start_time", "").split("T")[0]
+        except:
+            date_str = "Unknown date"
+            
+        reason = appt.get("reason", "No reason provided")
+        status = appt.get("status", "unknown")
+        appt_map[pid].append(f"{date_str}: {reason} ({status})")
+
+    patient_summaries = []
+    patient_map = {p["id"]: p for p in all_patients}
+    
+    # Pre-fetch contexts (optimization: could be parallelized or cached)
+    # For MVP, we'll do lightweight fetch
+    for p in all_patients:
+        # Get latest visit note or summary
+        visits = get_visits_for_patient(p["id"])
+        last_visit = visits[0].get("summary_ai", "") if visits else "No visits"
+        
+        # Get documents
+        docs = get_documents_for_patient(p["id"])
+        doc_titles = ", ".join([d["title"] for d in docs[:3]])  # First 3 docs
+        
+        # Get recent appointments
+        p_appts = appt_map.get(p["id"], [])
+        recent_appts = " | ".join(p_appts[:3]) if p_appts else "No recent appointments"
+
+        context = (
+            f"ID: {p['id']}\n"
+            f"Name: {p['name']}\n"
+            f"Age: {p.get('age', '?')}, Gender: {p.get('gender', '?')}\n"
+            f"Conditions: {', '.join(p.get('conditions', []))}\n"
+            f"Meds: {', '.join(p.get('medications', []))}\n"
+            f"Allergies: {', '.join(p.get('allergies', []))}\n"
+            f"Recent Appts: {recent_appts}\n"
+            f"Last Visit: {last_visit[:200]}...\n"
+            f"Documents: {doc_titles}\n"
+            "---"
+        )
+        patient_summaries.append(context)
+
+    full_context_str = "\n".join(patient_summaries)
+
+    # 2. Step 1: Identify Candidates
+    prompt = SEARCH_CANDIDATES_PROMPT.format(
+        query=query,
+        patient_summaries=full_context_str
+    )
+    
+    # Use async generation
+    response_text = await generate_ai_response_async(prompt, max_tokens=500)
+    
+    try:
+        # cleanup json
+        text = response_text.replace("```json", "").replace("```", "").strip()
+        start = text.find("[")
+        end = text.rfind("]") + 1
+        candidate_ids = json.loads(text[start:end])
+    except:
+        # Fallback: exact name match if AI fails
+        candidate_ids = [p["id"] for p in all_patients if query.lower() in p["name"].lower()]
+
+    results = []
+    
+    # 3. Step 2: Generate Relevance Reason
+    import asyncio
+    
+    async def get_reason(pid):
+        if pid not in patient_map:
+            return None
+        
+        p = patient_map[pid]
+        
+        # Get recent appointments for this specific patient
+        p_appts = appt_map.get(pid, [])
+        recent_appts_str = " | ".join(p_appts[:5])
+
+        # Rebuild context for specific patient (can be more detailed here)
+        p_context = (
+            f"Name: {p['name']}, Conditions: {p.get('conditions')}, "
+            f"Meds: {p.get('medications')}, Notes: {p.get('vitals')}, "
+            f"Appointments: {recent_appts_str}"
+        )
+        
+        reason_prompt = SEARCH_REASONING_PROMPT.format(
+            patient_context=p_context,
+            query=query
+        )
+        
+        reason = await generate_ai_response_async(reason_prompt, max_tokens=50)
+        return {
+            "patient_id": pid,
+            "patient_name": p["name"],
+            "matched_snippets": [reason.strip().replace('"', '')]
+        }
+
+    tasks = [get_reason(pid) for pid in candidate_ids if pid in patient_map]
+    if tasks:
+        results = await asyncio.gather(*tasks)
+        results = [r for r in results if r]  # Filter None
+    
+    if not results and not candidate_ids:
+         # If AI found nothing, try legacy exact match for safety
+         for p in all_patients:
+            if query.lower() in p["name"].lower():
+                results.append({
+                    "patient_id": p["id"],
+                    "patient_name": p["name"],
+                    "matched_snippets": ["Name match"]
+                })
 
     return {"results": results}
 

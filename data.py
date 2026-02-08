@@ -105,7 +105,7 @@ documents = {
         "title": "MRI Brain — Referral Letter",
         "doc_type": "referral",
         "uploaded_at": (today - timedelta(days=7)).isoformat(),
-        "extracted_text": "Referral for MRI Brain — Sarah Jenkins, 34F\n\nReferring Physician: Dr. Reynolds\nIndication: Recurring migraines (3+ weeks), right-sided, to rule out structural pathology.\nClinical Notes: No focal neurological deficits. No papilledema. Migraines not responding fully to Sumatriptan.\n\nPlease schedule MRI Brain with contrast at earliest convenience.",
+        "extracted_text": "Referral for MRI Brain — Sarah Jenkins, 34F\n\nReferring Physician: Dr. Prerna\nIndication: Recurring migraines (3+ weeks), right-sided, to rule out structural pathology.\nClinical Notes: No focal neurological deficits. No papilledema. Migraines not responding fully to Sumatriptan.\n\nPlease schedule MRI Brain with contrast at earliest convenience.",
     },
 }
 

@@ -6,16 +6,22 @@ Now with Supabase database and Google AI Studio (Gemma-3-27b-it) integration.
 import json
 import os
 import uuid
+import io
 from datetime import datetime
 from typing import AsyncGenerator
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, HTTPException, UploadFile, File, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import google.generativeai as genai
 
+import asyncio
+import logging
+import traceback
+from transcription import transcribe_audio
+from llm_provider import init_llm, get_llm
 from database import (
     get_patient,
     get_all_patients,
@@ -60,8 +66,20 @@ from prompts import (
     SEARCH_CANDIDATES_PROMPT,
     SEARCH_REASONING_PROMPT,
 )
+from gemini_live import GeminiLive, TOOL_DECLARATIONS, TOOL_MAPPING
 
-load_dotenv()
+load_dotenv(override=True)
+
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+MODEL_NAME = os.getenv("MODEL_NAME", "gemma-3-27b-it")
+
+# Gemini Live (Vertex AI) configuration
+GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID", "gen-lang-client-0151448461")
+GCP_LOCATION = os.getenv("GCP_LOCATION", "us-central1")
+GEMINI_LIVE_MODEL = os.getenv("GEMINI_LIVE_MODEL", "gemini-2.5-flash-native-audio-preview-12-2025")
+
+# Configure logging
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Parchi.ai API", version="1.0.0")
 
@@ -73,17 +91,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Configure Google AI
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
-if GOOGLE_API_KEY:
-    genai.configure(api_key=GOOGLE_API_KEY)
+# Initialize global LLM provider
+init_llm()
 
-# Use Gemma-3-27b-it model
-MODEL_NAME = "gemma-3-27b-it"
-
-
-def get_model():
-    """Get the configured Gemini/Gemma model."""
+def get_model_legacy():
+    """Fallback for any direct genai usage if still needed, though should be avoided."""
+    import google.generativeai as genai
     return genai.GenerativeModel(MODEL_NAME)
 
 
@@ -170,28 +183,19 @@ def build_patient_context(patient_id: str) -> dict:
 
 
 def generate_ai_response(prompt: str, max_tokens: int = 1000) -> str:
-    """Generate AI response using Google Gemma (Synchronous)."""
-    if not GOOGLE_API_KEY:
+    """Generate AI response using the global LLM provider."""
+    llm = get_llm()
+    if not llm:
         return "AI is not configured. Please set GOOGLE_API_KEY in your environment."
-    
-    try:
-        model = get_model()
-        response = model.generate_content(
-            prompt,
-            generation_config=genai.GenerationConfig(
-                temperature=0.3,
-                max_output_tokens=max_tokens,
-            )
-        )
-        return response.text
-    except Exception as e:
-        return f"AI error: {str(e)}"
+    return llm.generate(prompt, max_tokens)
 
 
 async def generate_ai_response_async(prompt: str, max_tokens: int = 1000) -> str:
-    """Generate AI response using Google Gemma (Asynchronous)."""
-    import asyncio
-    return await asyncio.to_thread(generate_ai_response, prompt, max_tokens)
+    """Generate AI response using the global LLM provider (Asynchronous)."""
+    llm = get_llm()
+    if not llm:
+        return "AI is not configured. Please set GOOGLE_API_KEY in your environment."
+    return await llm.generate_async(prompt, max_tokens)
 
 
 
@@ -202,6 +206,108 @@ async def generate_ai_response_async(prompt: str, max_tokens: int = 1000) -> str
 def health_check():
     """Health check endpoint."""
     return {"status": "healthy", "model": MODEL_NAME, "ai_configured": bool(GOOGLE_API_KEY)}
+
+
+@app.get("/health/gemini-live")
+def gemini_live_health():
+    """Pre-validate Gemini Live configuration."""
+    issues = []
+    auth_mode = "api_key" if GOOGLE_API_KEY else "vertex_ai"
+
+    if not GOOGLE_API_KEY and not GCP_PROJECT_ID:
+        issues.append("No GOOGLE_API_KEY or GCP_PROJECT_ID set")
+    if not GEMINI_LIVE_MODEL:
+        issues.append("GEMINI_LIVE_MODEL not set")
+
+    return {
+        "status": "ok" if not issues else "misconfigured",
+        "auth_mode": auth_mode,
+        "model": GEMINI_LIVE_MODEL,
+        "project_id": GCP_PROJECT_ID if auth_mode == "vertex_ai" else None,
+        "issues": issues or None,
+    }
+
+
+# --- Routes: Gemini Live Voice Chat ---
+
+
+@app.websocket("/ws/gemini-live")
+async def gemini_live_websocket(websocket: WebSocket):
+    """WebSocket endpoint for Gemini Live voice chat.
+    Binary messages = audio PCM, Text messages = JSON events.
+    """
+    await websocket.accept()
+    logger.info("[WS] Gemini Live connection accepted")
+
+    audio_input_queue = asyncio.Queue()
+    text_input_queue = asyncio.Queue()
+
+    async def audio_output_callback(data):
+        """Send raw PCM bytes back to browser."""
+        await websocket.send_bytes(data)
+
+    from google.genai import types as genai_types
+    gemini = GeminiLive(
+        project_id=GCP_PROJECT_ID,
+        location=GCP_LOCATION,
+        model=GEMINI_LIVE_MODEL,
+        input_sample_rate=16000,
+        tools=[genai_types.Tool(function_declarations=TOOL_DECLARATIONS)],
+        tool_mapping=TOOL_MAPPING,
+        api_key=GOOGLE_API_KEY,
+    )
+
+    async def receive_from_client():
+        try:
+            while True:
+                message = await websocket.receive()
+                if message.get("bytes"):
+                    await audio_input_queue.put(message["bytes"])
+                elif message.get("text"):
+                    await text_input_queue.put(message["text"])
+        except WebSocketDisconnect:
+            logger.info("[WS] Client disconnected")
+        except Exception as e:
+            logger.error(f"[WS] Error receiving from client: {e}")
+
+    receive_task = asyncio.create_task(receive_from_client())
+
+    try:
+        async for event in gemini.start_session(
+            audio_input_queue=audio_input_queue,
+            text_input_queue=text_input_queue,
+            audio_output_callback=audio_output_callback,
+        ):
+            if event:
+                await websocket.send_json(event)
+    except WebSocketDisconnect:
+        logger.info("[WS] Client disconnected during session")
+    except Exception as e:
+        logger.error(f"[WS] Error in Gemini session: {e}")
+        logger.error(traceback.format_exc())
+        # Classify error and send user-friendly message to client
+        err_str = str(e).lower()
+        if "api key" in err_str or "authenticate" in err_str or "permission" in err_str or "403" in err_str:
+            user_msg = "Authentication failed. Check your GOOGLE_API_KEY."
+        elif "not found" in err_str or "404" in err_str or "model" in err_str:
+            user_msg = f"Model not found: {GEMINI_LIVE_MODEL}. Check GEMINI_LIVE_MODEL env var."
+        elif "quota" in err_str or "rate" in err_str or "429" in err_str:
+            user_msg = "API quota exceeded. Please try again later."
+        elif "connect" in err_str or "timeout" in err_str or "network" in err_str:
+            user_msg = "Network error connecting to Gemini API."
+        else:
+            user_msg = f"Gemini session error: {e}"
+        try:
+            await websocket.send_json({"type": "error", "error": user_msg})
+        except Exception:
+            pass
+    finally:
+        receive_task.cancel()
+        try:
+            await websocket.close()
+        except:
+            pass
+        logger.info("[WS] WebSocket handler finished")
 
 
 # --- Routes: Patients ---
@@ -464,6 +570,40 @@ def mark_patient_seen(req: MarkSeenRequest):
     return {"success": True, "appointment": updated}
 
 
+# --- Helpers: Consult ---
+
+
+def _parse_consult_insights(raw_response: str, transcript_text: str) -> dict:
+    """Parse LLM JSON response into consult insights, with fallback."""
+    try:
+        json_str = raw_response
+        if "```json" in raw_response:
+            json_str = raw_response.split("```json")[1].split("```")[0]
+        elif "```" in raw_response:
+            json_str = raw_response.split("```")[1].split("```")[0]
+        return json.loads(json_str)
+    except (json.JSONDecodeError, IndexError):
+        return {
+            "clean_transcript": transcript_text,
+            "soap": {
+                "subjective": "See transcript",
+                "objective": "See transcript",
+                "assessment": "Pending review",
+                "plan": "Pending review",
+            },
+            "extracted_facts": {
+                "symptoms": [],
+                "duration": "See transcript",
+                "medications_discussed": [],
+                "allergies_mentioned": [],
+            },
+            "follow_up_questions": ["Unable to parse AI response. Please review transcript manually."],
+            "differential_suggestions": [],
+            "disclaimer": "These are AI-generated suggestions for reference only. Clinical judgment is required.",
+            "raw_response": raw_response,
+        }
+
+
 # --- Routes: Consult Sessions ---
 
 
@@ -509,35 +649,7 @@ def stop_consult(session_id: str, req: ConsultStopRequest):
     )
 
     raw_response = generate_ai_response(prompt, max_tokens=2000)
-
-    # Try to parse JSON from response
-    try:
-        json_str = raw_response
-        if "```json" in raw_response:
-            json_str = raw_response.split("```json")[1].split("```")[0]
-        elif "```" in raw_response:
-            json_str = raw_response.split("```")[1].split("```")[0]
-        insights = json.loads(json_str)
-    except (json.JSONDecodeError, IndexError):
-        insights = {
-            "clean_transcript": req.transcript_text,
-            "soap": {
-                "subjective": "See transcript",
-                "objective": "See transcript",
-                "assessment": "Pending review",
-                "plan": "Pending review",
-            },
-            "extracted_facts": {
-                "symptoms": [],
-                "duration": "See transcript",
-                "medications_discussed": [],
-                "allergies_mentioned": [],
-            },
-            "follow_up_questions": ["Unable to parse AI response. Please review transcript manually."],
-            "differential_suggestions": [],
-            "disclaimer": "These are AI-generated suggestions for reference only. Clinical judgment is required.",
-            "raw_response": raw_response,
-        }
+    insights = _parse_consult_insights(raw_response, req.transcript_text)
 
     # Update session
     update_consult_session(session_id, {
@@ -550,6 +662,57 @@ def stop_consult(session_id: str, req: ConsultStopRequest):
     return {
         "session_id": session_id,
         "transcript": insights.get("clean_transcript", req.transcript_text),
+        "soap": insights.get("soap"),
+        "insights": insights,
+    }
+
+
+@app.post("/consult/{session_id}/transcribe")
+async def transcribe_consult(session_id: str, file: UploadFile = File(...)):
+    """Transcribe an audio recording and generate SOAP note for a consult session."""
+    session = get_consult_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Consult session not found")
+
+    patient = get_patient(session["patient_id"])
+    if not patient:
+        raise HTTPException(status_code=404, detail="Patient not found")
+
+    # Read audio bytes
+    audio_bytes = await file.read()
+    filename = file.filename or "recording.webm"
+
+    # Step 1: Transcribe audio
+    import asyncio
+    transcript_text = await asyncio.to_thread(transcribe_audio, audio_bytes, filename)
+
+    # Step 2: Analyze transcript with LLM
+    vitals = patient.get("vitals", {})
+    prompt = CONSULT_ANALYSIS_PROMPT.format(
+        patient_name=patient["name"],
+        patient_age=patient.get("age", "Unknown"),
+        patient_gender=patient.get("gender", "Unknown"),
+        conditions=", ".join(patient.get("conditions", [])) or "None",
+        medications=", ".join(patient.get("medications", [])) or "None",
+        allergies=", ".join(patient.get("allergies", [])) or "None",
+        vitals=f"BP {vitals.get('bp_systolic', 'N/A')}/{vitals.get('bp_diastolic', 'N/A')}, SpO2 {vitals.get('spo2', 'N/A')}%, HR {vitals.get('heart_rate', 'N/A')}, Temp {vitals.get('temperature_f', 'N/A')}°F",
+        transcript=transcript_text,
+    )
+
+    raw_response = await generate_ai_response_async(prompt, max_tokens=2000)
+    insights = _parse_consult_insights(raw_response, transcript_text)
+
+    # Step 3: Persist results
+    update_consult_session(session_id, {
+        "ended_at": datetime.now().isoformat(),
+        "transcript_text": transcript_text,
+        "soap_note": insights.get("soap"),
+        "insights_json": insights,
+    })
+
+    return {
+        "session_id": session_id,
+        "transcript": insights.get("clean_transcript", transcript_text),
         "soap": insights.get("soap"),
         "insights": insights,
     }
@@ -577,12 +740,20 @@ def chat(req: ChatRequest):
         for v in ctx["visits"]
     ) or "No previous visits."
 
-    # Build consult summaries
-    consult_texts = "\n\n".join(
-        f"--- Consult {c.get('started_at', 'Unknown')} ---\nSOAP: {json.dumps(c.get('soap_note', {}))}"
-        for c in ctx["consults"]
-        if c.get("soap_note")
-    ) or "No recent consult sessions."
+    # Build consult summaries (include transcripts and extracted facts)
+    consult_parts = []
+    for c in ctx["consults"]:
+        lines = [f"--- Consult {c.get('started_at', 'Unknown')} ---"]
+        if c.get("transcript_text"):
+            lines.append(f"Transcript: {c['transcript_text'][:1000]}")
+        if c.get("soap_note"):
+            lines.append(f"SOAP: {json.dumps(c['soap_note'])}")
+        if c.get("insights_json") and isinstance(c["insights_json"], dict):
+            facts = c["insights_json"].get("extracted_facts", {})
+            if facts:
+                lines.append(f"Extracted facts: {json.dumps(facts)}")
+        consult_parts.append("\n".join(lines))
+    consult_texts = "\n\n".join(consult_parts) if consult_parts else "No recent consult sessions."
 
     system_prompt = PATIENT_QA_PROMPT.format(
         patient_name=patient["name"],
@@ -687,6 +858,22 @@ async def generate_ai_summary_stream(patient_id: str):
                 for v in visits[:5]  # Last 5 visits
             ) or "No previous visits."
 
+            # Fetch consult transcripts for richer context
+            consults = get_consults_for_patient(patient_id)
+            consult_parts = []
+            for c in consults[:5]:
+                parts = [f"- Consult {c.get('started_at', 'Unknown')}:"]
+                if c.get("transcript_text"):
+                    parts.append(f"  Transcript excerpt: {c['transcript_text'][:500]}")
+                if c.get("soap_note"):
+                    parts.append(f"  SOAP: {json.dumps(c['soap_note'])[:300]}")
+                if c.get("insights_json") and isinstance(c["insights_json"], dict):
+                    facts = c["insights_json"].get("extracted_facts", {})
+                    if facts:
+                        parts.append(f"  Extracted facts: {json.dumps(facts)[:300]}")
+                consult_parts.append("\n".join(parts))
+            consult_texts = "\n".join(consult_parts) or "No past consult transcripts."
+
             full_context = f"""
 **Patient Profile:**
 {patient_profile}
@@ -696,14 +883,12 @@ async def generate_ai_summary_stream(patient_id: str):
 
 **Recent Visits:**
 {visit_texts}
+
+**Past Consult Transcripts:**
+{consult_texts}
 """
             
             yield emit("success", "✓ Context prepared")
-            
-            # Step 6: Check AI configuration
-            if not GOOGLE_API_KEY:
-                yield emit("error", "❌ GOOGLE_API_KEY not configured in environment")
-                return
             
             # Step 7: Granular generation
             yield emit("info", "🚀 Starting AI Analysis...")
@@ -753,7 +938,7 @@ async def generate_ai_summary_stream(patient_id: str):
             # Step 8: Save to database
             yield emit("info", "💾 Saving to database...")
             
-            summary_id = f"ais-{uuid.uuid4().hex[:8]}"
+            summary_id = str(uuid.uuid4())
             summary_data = {
                 "id": summary_id,
                 "patient_id": patient_id,
@@ -823,6 +1008,19 @@ async def generate_differential_diagnosis(patient_id: str):
     history = f"Conditions: {', '.join(patient.get('conditions', []))}\nMedications: {', '.join(patient.get('medications', []))}"
     findings = ai_intake.get("findings", []) if ai_intake else []
     findings_str = "\n".join(findings) if isinstance(findings, list) else str(findings)
+
+    # Enrich findings with symptoms extracted from recent consults
+    consults = get_consults_for_patient(patient_id)
+    for c in consults[:3]:
+        insights_json = c.get("insights_json")
+        if isinstance(insights_json, dict):
+            facts = insights_json.get("extracted_facts", {})
+            symptoms = facts.get("symptoms", [])
+            if symptoms:
+                findings_str += "\nConsult-reported symptoms: " + ", ".join(symptoms)
+            duration = facts.get("duration", "")
+            if duration:
+                findings_str += f"\nDuration: {duration}"
 
     # 2. Step 1: Generate Candidates
     candidates_prompt = DIFFERENTIAL_CANDIDATES_PROMPT.format(
@@ -952,14 +1150,51 @@ async def upload_document(
     doc_type: str = "general",
     file: UploadFile = File(...)
 ):
-    """Upload a document for a patient."""
+    """Upload a document for a patient with OCR text extraction."""
     patient = get_patient(patient_id)
     if not patient:
         raise HTTPException(status_code=404, detail="Patient not found")
     
     # Read file content
     content = await file.read()
-    extracted_text = content.decode("utf-8", errors="ignore")[:5000]  # Limit text extraction
+    extracted_text = ""
+    content_type = file.content_type or ""
+    filename = file.filename or ""
+    
+    try:
+        # Handle PDF files
+        if content_type == "application/pdf" or filename.lower().endswith(".pdf"):
+            try:
+                import pdfplumber
+                with pdfplumber.open(io.BytesIO(content)) as pdf:
+                    text_parts = []
+                    for page in pdf.pages:
+                        page_text = page.extract_text()
+                        if page_text:
+                            text_parts.append(page_text)
+                    extracted_text = "\n\n".join(text_parts)
+            except Exception as pdf_err:
+                extracted_text = f"[PDF extraction error: {str(pdf_err)}]"
+        
+        # Handle image files (OCR with pytesseract)
+        elif content_type.startswith("image/") or any(filename.lower().endswith(ext) for ext in [".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff"]):
+            try:
+                import pytesseract
+                from PIL import Image
+                image = Image.open(io.BytesIO(content))
+                extracted_text = pytesseract.image_to_string(image)
+            except Exception as ocr_err:
+                extracted_text = f"[OCR error: {str(ocr_err)}]"
+        
+        # Handle text files
+        else:
+            extracted_text = content.decode("utf-8", errors="ignore")
+    
+    except Exception as e:
+        extracted_text = f"[Text extraction error: {str(e)}]"
+    
+    # Limit text to 10000 characters for storage
+    extracted_text = extracted_text[:10000] if extracted_text else ""
     
     doc_id = f"d-{uuid.uuid4().hex[:8]}"
     document = create_document({
@@ -969,7 +1204,8 @@ async def upload_document(
         "doc_type": doc_type,
         "extracted_text": extracted_text,
     })
-    return {"document": document}
+    return {"document": document, "extracted_text_length": len(extracted_text)}
+
 
 
 if __name__ == "__main__":

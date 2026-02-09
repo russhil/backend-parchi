@@ -47,44 +47,104 @@ def get_all_patients() -> list[dict]:
 
 
 def search_patients(query: str) -> list[dict]:
-    """Search patients by name, conditions, or medications."""
+    """
+    Comprehensive search for patients across all records:
+    - Demographics, conditions, medications, allergies
+    - Clinical dumps (transcripts, notes)
+    - Doctor notes
+    - Visit summaries
+    - Report insights
+    - AI Intake summaries
+    """
     client = get_supabase()
     query_lower = query.lower()
-    # Supabase doesn't support full-text search on arrays easily,
-    # so we fetch all and filter in Python for MVP
-    result = client.table("patients").select("*").execute()
-    
-    matches = []
-    for patient in result.data or []:
-        snippets = []
+    matches = {}  # patient_id -> {patient_name, snippets}
+
+    # Helper to add match
+    def add_match(pid, name, snippet):
+        if pid not in matches:
+            matches[pid] = {"patient_id": pid, "patient_name": name, "matched_snippets": []}
+        matches[pid]["matched_snippets"].append(snippet)
+
+    # 1. Search Patients Table (Memory-based for arrays)
+    patients = client.table("patients").select("*").execute().data or []
+    patient_map = {p["id"]: p["name"] for p in patients}
+
+    for p in patients:
+        pid = p["id"]
+        p_name = p["name"]
         
-        # Search name
-        if query_lower in patient["name"].lower():
-            snippets.append(f"Patient name matches: {patient['name']}")
+        # Name
+        if query_lower in p_name.lower():
+            add_match(pid, p_name, f"Name match: {p_name}")
         
-        # Search conditions
-        for cond in patient.get("conditions", []):
+        # Arrays
+        for cond in (p.get("conditions") or []):
             if query_lower in cond.lower():
-                snippets.append(f"Known condition: {cond}")
-        
-        # Search medications
-        for med in patient.get("medications", []):
+                add_match(pid, p_name, f"Condition: {cond}")
+        for med in (p.get("medications") or []):
             if query_lower in med.lower():
-                snippets.append(f"Current medication: {med}")
-        
-        # Search allergies
-        for allergy in patient.get("allergies", []):
+                add_match(pid, p_name, f"Medication: {med}")
+        for allergy in (p.get("allergies") or []):
             if query_lower in allergy.lower():
-                snippets.append(f"Allergy: {allergy}")
+                add_match(pid, p_name, f"Allergy: {allergy}")
+
+    # 2. Search Clinical Dumps
+    dumps = client.table("clinical_dumps").select("patient_id, combined_dump, transcript_text, manual_notes").execute().data or []
+    for d in dumps:
+        pid = d["patient_id"]
+        if pid not in patient_map: continue
         
-        if snippets:
-            matches.append({
-                "patient_id": patient["id"],
-                "patient_name": patient["name"],
-                "matched_snippets": snippets,
-            })
-    
-    return matches
+        text = (d.get("combined_dump") or "") + " " + (d.get("transcript_text") or "") + " " + (d.get("manual_notes") or "")
+        if query_lower in text.lower():
+            snippet = text[max(0, text.lower().find(query_lower)-30):min(len(text), text.lower().find(query_lower)+100)]
+            add_match(pid, patient_map[pid], f"Clinical Dump match: ...{snippet}...")
+
+    # 3. Search Notes
+    notes = client.table("notes").select("patient_id, content").execute().data or []
+    for n in notes:
+        pid = n["patient_id"]
+        if pid not in patient_map: continue
+        
+        if query_lower in n.get("content", "").lower():
+            text = n["content"]
+            snippet = text[max(0, text.lower().find(query_lower)-30):min(len(text), text.lower().find(query_lower)+100)]
+            add_match(pid, patient_map[pid], f"Note match: ...{snippet}...")
+
+    # 4. Search Visits
+    visits = client.table("visits").select("patient_id, summary_ai, doctor_notes_text").execute().data or []
+    for v in visits:
+        pid = v["patient_id"]
+        if pid not in patient_map: continue
+        
+        text = (v.get("summary_ai") or "") + " " + (v.get("doctor_notes_text") or "")
+        if query_lower in text.lower():
+            snippet = text[max(0, text.lower().find(query_lower)-30):min(len(text), text.lower().find(query_lower)+100)]
+            add_match(pid, patient_map[pid], f"Visit match: ...{snippet}...")
+
+    # 5. Search Report Insights
+    reports = client.table("report_insights").select("patient_id, insight_text").execute().data or []
+    for r in reports:
+        pid = r["patient_id"]
+        if pid not in patient_map: continue
+        
+        if query_lower in r.get("insight_text", "").lower():
+            text = r["insight_text"]
+            snippet = text[max(0, text.lower().find(query_lower)-30):min(len(text), text.lower().find(query_lower)+100)]
+            add_match(pid, patient_map[pid], f"Report Insight match: ...{snippet}...")
+
+    # 6. Search AI Intake Summaries
+    intakes = client.table("ai_intake_summaries").select("patient_id, summary_text").execute().data or []
+    for i in intakes:
+        pid = i["patient_id"]
+        if pid not in patient_map: continue
+        
+        if query_lower in i.get("summary_text", "").lower():
+            text = i["summary_text"]
+            snippet = text[max(0, text.lower().find(query_lower)-30):min(len(text), text.lower().find(query_lower)+100)]
+            add_match(pid, patient_map[pid], f"Intake Summary match: ...{snippet}...")
+
+    return list(matches.values())
 
 
 def create_patient(patient_data: dict) -> dict:
@@ -166,6 +226,71 @@ def update_appointment(appointment_id: str, updates: dict) -> dict:
         .execute()
     )
     return result.data[0] if result.data else {}
+
+
+def get_appointment_with_details(appointment_id: str) -> Optional[dict]:
+    """Fetch a single appointment with patient info."""
+    client = get_supabase()
+    result = (
+        client.table("appointments")
+        .select("*, patients(*)")
+        .eq("id", appointment_id)
+        .execute()
+    )
+    return result.data[0] if result.data else None
+
+
+def get_appointments_summary_for_patient(patient_id: str) -> list[dict]:
+    """Fetch minimal appointment info for patient page list (id, start_time, status, reason)."""
+    client = get_supabase()
+    result = (
+        client.table("appointments")
+        .select("id, start_time, status, reason")
+        .eq("patient_id", patient_id)
+        .order("start_time", desc=True)
+        .execute()
+    )
+    return result.data or []
+
+
+def get_ai_intake_summary_for_appointment(appointment_id: str) -> Optional[dict]:
+    """Fetch AI intake summary for a specific appointment."""
+    client = get_supabase()
+    result = (
+        client.table("ai_intake_summaries")
+        .select("*")
+        .eq("appointment_id", appointment_id)
+        .order("created_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    return result.data[0] if result.data else None
+
+
+def get_differential_diagnosis_for_appointment(appointment_id: str) -> list[dict]:
+    """Fetch differential diagnoses for a specific appointment."""
+    client = get_supabase()
+    result = (
+        client.table("differential_diagnoses")
+        .select("*")
+        .eq("appointment_id", appointment_id)
+        .order("match_pct", desc=True)
+        .execute()
+    )
+    return result.data or []
+
+
+def get_clinical_dumps_for_appointment(appointment_id: str) -> list[dict]:
+    """Fetch clinical dumps for a specific appointment."""
+    client = get_supabase()
+    result = (
+        client.table("clinical_dumps")
+        .select("*")
+        .eq("appointment_id", appointment_id)
+        .order("created_at", desc=True)
+        .execute()
+    )
+    return result.data or []
 
 
 # --- Visit Operations ---
@@ -400,3 +525,107 @@ def get_notes_for_patient(patient_id: str) -> list[dict]:
         .execute()
     )
     return result.data or []
+
+
+# --- Clinical Dumps Operations ---
+
+def create_clinical_dump(data: dict) -> dict:
+    """Create a new clinical dump record."""
+    client = get_supabase()
+    result = client.table("clinical_dumps").insert(data).execute()
+    return result.data[0] if result.data else {}
+
+
+def update_clinical_dump(dump_id: str, updates: dict) -> dict:
+    """Update a clinical dump by ID."""
+    client = get_supabase()
+    result = (
+        client.table("clinical_dumps")
+        .update(updates)
+        .eq("id", dump_id)
+        .execute()
+    )
+    return result.data[0] if result.data else {}
+
+
+def get_clinical_dumps_for_patient(patient_id: str) -> list[dict]:
+    """Fetch clinical dumps for a patient, most recent first."""
+    client = get_supabase()
+    result = (
+        client.table("clinical_dumps")
+        .select("*")
+        .eq("patient_id", patient_id)
+        .order("created_at", desc=True)
+        .execute()
+    )
+    return result.data or []
+
+
+def get_clinical_dump(dump_id: str) -> Optional[dict]:
+    """Fetch a single clinical dump by ID."""
+    client = get_supabase()
+    result = (
+        client.table("clinical_dumps")
+        .select("*")
+        .eq("id", dump_id)
+        .execute()
+    )
+    return result.data[0] if result.data else None
+
+
+# --- Auth Operations ---
+
+# --- Telegram Intake Session Operations ---
+
+def create_telegram_session(data: dict) -> dict:
+    """Create a new telegram intake session."""
+    client = get_supabase()
+    result = client.table("telegram_intake_sessions").insert(data).execute()
+    return result.data[0] if result.data else {}
+
+
+def update_telegram_session(session_id: str, updates: dict) -> dict:
+    """Update a telegram intake session."""
+    client = get_supabase()
+    updates["updated_at"] = datetime.now().isoformat()
+    result = (
+        client.table("telegram_intake_sessions")
+        .update(updates)
+        .eq("id", session_id)
+        .execute()
+    )
+    return result.data[0] if result.data else {}
+
+
+def get_active_telegram_session(chat_id: int) -> Optional[dict]:
+    """Get the in-progress telegram intake session for a chat ID."""
+    client = get_supabase()
+    result = (
+        client.table("telegram_intake_sessions")
+        .select("*")
+        .eq("telegram_chat_id", chat_id)
+        .eq("status", "in_progress")
+        .order("created_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    return result.data[0] if result.data else None
+
+
+# --- Auth Operations ---
+
+def verify_login(username: str, password_plain: str) -> bool:
+    """
+    Verify login credentials.
+    WARNING: Currently checking plain text password as requested for MVP.
+    """
+    client = get_supabase()
+    # Check if user exists with matching username and password
+    result = (
+        client.table("users")
+        .select("id")
+        .eq("username", username)
+        .eq("password_hash", password_plain)  # Using the column we created
+        .execute()
+    )
+    return bool(result.data)

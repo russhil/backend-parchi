@@ -19,35 +19,62 @@ from database import (
     get_visits_for_patient,
     get_documents_for_patient,
     get_prescriptions_for_patient,
+    get_clinical_dumps_for_patient,
     search_patients,
+    get_ai_intake_summary,
+    get_differential_diagnosis,
+    get_report_insights,
+    get_notes_for_patient,
+    get_consults_for_patient,
 )
+
+from prompts import (
+    SEARCH_CANDIDATES_PROMPT,
+    SEARCH_REASONING_PROMPT,
+)
+from llm_provider import get_llm
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_INSTRUCTION = """You are Dr. Prerna's AI voice assistant for Parchi.ai, a medical records system for an Indian clinic.
+SYSTEM_INSTRUCTION = """You are YC's AI voice assistant for Parchi.ai, a medical records system for an Indian clinic.
 
 You help the doctor by answering questions about patients, appointments, and medical records using the tools available to you.
 
-Rules:
+## Available Data (Schematic Overview):
+You have access to the following patient records via the `get_patient_details` tool:
+1. **Demographics**: Name, age, gender, contact info.
+2. **Medical Profile**: Conditions, medications, allergies, vitals.
+3. **Clinical Dumps**: Raw transcripts and notes from previous consultations (Table: `clinical_dumps`).
+4. **Consult Sessions**: Structured consultation records (Table: `consult_sessions`).
+5. **AI Intake Summaries**: AI-generated summaries of patient intake (Table: `ai_intake_summaries`).
+6. **Differential Diagnoses**: AI-suggested potential diagnoses (Table: `differential_diagnoses`).
+7. **Report Insights**: Key insights from uploaded medical reports (Table: `report_insights`).
+8. **Notes**: Manual notes added by doctors (Table: `notes`).
+9. **Visits**: Past visit history (Table: `visits`).
+10. **Documents**: Uploaded lab reports and files (Table: `documents`).
+11. **Prescriptions**: Past prescriptions (Table: `prescriptions`).
+
+## Rules:
 1. Be concise — this is voice output.
 2. When asked about patients or appointments, use the provided tools to look up data. Do NOT guess.
-3. Summarize results clearly. For patient lists, mention key details (name, age, conditions).
-4. If a tool returns no data, say so honestly.
-5. Protect patient privacy — only share information with the doctor.
-6. For medical queries, note that you're providing information from records, not medical advice.
+3. The `get_patient_details` tool returns a Comprehensive Patient Record containing ALL the above data.
+4. Summarize results clearly. For patient lists, mention key details (name, age, conditions).
+5. If a tool returns no data, say so honestly.
+6. Protect patient privacy — only share information with the doctor.
+7. For medical queries, note that your suggestions are based on records, not medical advice.
 """
 
 # Tool function declarations for Gemini
 TOOL_DECLARATIONS = [
     types.FunctionDeclaration(
         name="search_patients",
-        description="Search for patients by name, condition, or medication. Use this when the doctor asks about a specific patient or group of patients.",
+        description="Smart AI Search. Use this to find patients by symptoms, complex queries, or inferred conditions (e.g. 'patients with heart issues', 'who has a fish allergy'). Searches across ALL records including notes and reports.",
         parameters=types.Schema(
             type=types.Type.OBJECT,
             properties={
                 "query": types.Schema(
                     type=types.Type.STRING,
-                    description="Search query — patient name, condition, or medication",
+                    description="The search query.",
                 ),
             },
             required=["query"],
@@ -128,31 +155,166 @@ TOOL_DECLARATIONS = [
 ]
 
 
-def _tool_search_patients(query: str):
-    """Search patients and return summarized results."""
-    results = search_patients(query)
-    if not results:
+def _build_search_context_sync(query: str) -> str:
+    """Synchronous helper to build search context without blocking event loop."""
+    # 1. Fast Text Search first (using the comprehensive DB search)
+    # This searches Name, Arrays, Dumps, Notes, Visits, Reports, Intake
+    text_candidates = search_patients(query)
+    
+    candidate_ids = set()
+    patient_summaries = []
+    
+    # Add text match candidates first (High Priority)
+    for r in text_candidates:
+        candidate_ids.add(r['patient_id'])
+        summary = f"ID: {r['patient_id']}\nName: {r['patient_name']}\nMATCH: {', '.join(r.get('matched_snippets', []))}\n---"
+        patient_summaries.append(summary)
+    
+    # 2. If we have few results (< 5), fetch all patients for semantic search fallback
+    # This ensures we don't miss "heart issues" -> "cardiac" semantic matches that text search misses
+    if len(candidate_ids) < 5:
+        all_patients = get_all_patients()
+        for p in all_patients:
+            if p["id"] in candidate_ids:
+                continue
+            
+            # Lightweight context fetch for semantic fallback
+            conditions = ", ".join(p.get("conditions") or [])
+            medications = ", ".join(p.get("medications") or [])
+            intake = get_ai_intake_summary(p["id"])
+            intake_text = (intake.get("summary_text") or "") if intake else ""
+            
+            summary = (
+                f"ID: {p['id']}\nName: {p['name']}\n"
+                f"Conditions: {conditions}\n"
+                f"Meds: {medications}\n"
+                f"Intake: {intake_text[:100]}\n---"
+            )
+            patient_summaries.append(summary)
+            
+    return "\n".join(patient_summaries[:20]) # Limit to 20 to fit context
+
+
+async def _tool_search_patients(query: str):
+    """Smart AI Search for patients."""
+    # 1. Build context in a separate thread to avoid blocking WebSocket loop
+    full_context_str = await asyncio.to_thread(_build_search_context_sync, query)
+    
+    if not full_context_str:
+        return "No patients found in the database."
+
+    # 2. AI Selection & Reasoning
+    prompt = SEARCH_CANDIDATES_PROMPT.format(
+        query=query,
+        patient_summaries=full_context_str
+    )
+    
+    llm = get_llm()
+    if not llm:
+        return "Search unavailable: AI not configured."
+
+    response_text = await llm.generate_async(prompt, max_tokens=500)
+    
+    try:
+        text = response_text.replace("```json", "").replace("```", "").strip()
+        start = text.find("[")
+        end = text.rfind("]") + 1
+        candidate_ids = json.loads(text[start:end])
+    except:
+        candidate_ids = []
+
+    if not candidate_ids:
+        # If AI returns nothing, check if we had strong text matches in the context
+        # We can re-run looking for "MATCH:" lines in our context buffer as a fallback
+        if "MATCH:" in full_context_str:
+             return "I found some potential matches based on keywords:\n" + full_context_str
         return f"No patients found matching '{query}'."
-    summaries = []
-    for r in results:
-        summaries.append(f"{r['patient_name']} (ID: {r['patient_id']}): {', '.join(r.get('matched_snippets', []))}")
-    return "\n".join(summaries)
+
+    # 3. Generate Reasoning for selected candidates
+    # We can skip a second LLM call if we want speed, OR make it parallel
+    results = []
+    
+    async def get_reasoning(pid):
+        # We need patient name for the output. 
+        # Ideally we'd have a map, but for now let's just fetch the minimal info 
+        # or parse it from the context string if we were clever. 
+        # Safer to just do a quick DB fetch or rely on what we have.
+        # Speed hack: just return the ID and Name processing later? 
+        # Let's do a fast fetch.
+        p = await asyncio.to_thread(get_patient, pid)
+        if not p: return None
+        
+        reason_prompt = SEARCH_REASONING_PROMPT.format(
+            patient_context=f"Name: {p['name']}, Conditions: {p.get('conditions')}",
+            query=query
+        )
+        reason = await llm.generate_async(reason_prompt, max_tokens=60)
+        return f"{p['name']} (ID: {pid}): {reason.strip().replace('\"', '')}"
+
+    tasks = [get_reasoning(pid) for pid in candidate_ids]
+    reasoning_results = await asyncio.gather(*tasks)
+    
+    return "\n".join([r for r in reasoning_results if r])
 
 
 def _tool_get_patient_details(patient_id: str):
-    """Get full patient details."""
+    """Get full patient details including recent clinical dumps."""
     patient = get_patient(patient_id)
     if not patient:
         return f"No patient found with ID {patient_id}."
-    return json.dumps({
+    result = {
         "name": patient.get("name"),
         "age": patient.get("age"),
         "gender": patient.get("gender"),
-        "conditions": patient.get("conditions", []),
-        "medications": patient.get("medications", []),
-        "allergies": patient.get("allergies", []),
+        "conditions": patient.get("conditions") or [],
+        "medications": patient.get("medications") or [],
+        "allergies": patient.get("allergies") or [],
         "vitals": patient.get("vitals", {}),
-    }, indent=2)
+    }
+    # Fetch detailed data from all tables
+    
+    # 1. Clinical Dumps
+    dumps = get_clinical_dumps_for_patient(patient_id)
+    dump_summaries = []
+    if dumps:
+        for d in dumps[:5]:  # Last 5
+            text = d.get("combined_dump") or d.get("transcript_text") or ""
+            dump_summaries.append({
+                "date": d.get("created_at"),
+                "summary": text[:500] + "..." if len(text) > 500 else text
+            })
+    result["clinical_dumps"] = dump_summaries
+
+    # 2. AI Intake Summaries
+    intake = get_ai_intake_summary(patient_id)
+    result["ai_intake_summary"] = (intake.get("summary_text") or "") if intake else ""
+
+    # 3. Differential Diagnoses
+    diffs = get_differential_diagnosis(patient_id)
+    result["differential_diagnoses"] = [
+        f"{d.get('condition_name')} ({d.get('match_pct')}%) - {d.get('rationale')}" 
+        for d in diffs
+    ] if diffs else []
+
+    # 4. Report Insights
+    report_insight = get_report_insights(patient_id)
+    result["latest_report_insight"] = (report_insight.get("insight_text") or "") if report_insight else ""
+
+    # 5. Manual Notes
+    notes = get_notes_for_patient(patient_id)
+    result["doctor_notes"] = [
+        f"{n.get('created_at')}: {n.get('content')}" 
+        for n in notes[:5]
+    ] if notes else []
+
+    # 6. Consult Sessions
+    consults = get_consults_for_patient(patient_id)
+    result["recent_consults"] = [
+        f"{c.get('started_at')}: {(c.get('transcript_text') or '')[:200]}..." 
+        for c in consults[:3]
+    ] if consults else []
+
+    return json.dumps(result, indent=2, default=str)
 
 
 def _tool_get_todays_appointments():
@@ -196,7 +358,7 @@ def _tool_get_patient_prescriptions(patient_id: str):
         return f"No prescriptions found for patient {patient_id}."
     lines = []
     for p in prescriptions[:10]:
-        meds = p.get("medications", [])
+        meds = p.get("medications") or []
         med_names = ", ".join(m.get("name", "?") for m in meds) if isinstance(meds, list) else str(meds)
         lines.append(f"{p.get('created_at', 'Unknown')}: {med_names} — {p.get('diagnosis', 'N/A')}")
     return "\n".join(lines)
@@ -209,7 +371,8 @@ def _tool_get_all_patients():
         return "No patients in the system."
     lines = []
     for p in patients:
-        conditions = ", ".join(p.get("conditions", [])) or "None"
+        conds = p.get("conditions")
+        conditions = ", ".join(str(c) for c in conds) if isinstance(conds, list) else str(conds)
         lines.append(f"{p['name']} (ID: {p['id']}, Age: {p.get('age', '?')}): {conditions}")
     return "\n".join(lines)
 

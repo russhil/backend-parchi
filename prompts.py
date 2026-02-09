@@ -157,7 +157,7 @@ Generate a JSON response with this exact structure:
 Generate ONLY the JSON, no additional text before or after."""
 
 
-PATIENT_QA_PROMPT = """You are a clinical AI assistant for Parchi.ai, helping Dr. Prerna access patient information quickly and accurately.
+PATIENT_QA_PROMPT = """You are a clinical AI assistant for Parchi.ai, helping YC access patient information quickly and accurately.
 
 ## Important Rules:
 1. Answer ONLY based on the provided patient data below
@@ -193,6 +193,9 @@ PATIENT_QA_PROMPT = """You are a clinical AI assistant for Parchi.ai, helping Dr
 
 ## Recent Consult Sessions:
 {consults}
+
+## Clinical Dumps (Raw consultation transcripts & notes):
+{clinical_dumps}
 
 ---
 

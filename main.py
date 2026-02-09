@@ -1,5 +1,5 @@
 """
-ClinicOS/Parchi.ai — FastAPI Backend (MVP)
+Parchi.ai — FastAPI Backend (MVP)
 Now with Supabase database and Google AI Studio (Gemma-3-27b-it) integration.
 """
 
@@ -7,11 +7,12 @@ import json
 import os
 import uuid
 import io
+from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import AsyncGenerator
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, UploadFile, File, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -32,6 +33,11 @@ from database import (
     get_all_appointments,
     create_appointment,
     update_appointment,
+    get_appointment_with_details,
+    get_appointments_summary_for_patient,
+    get_ai_intake_summary_for_appointment,
+    get_differential_diagnosis_for_appointment,
+    get_clinical_dumps_for_appointment,
     get_visits_for_patient,
     create_visit,
     get_documents_for_patient,
@@ -50,6 +56,14 @@ from database import (
     create_note,
     get_notes_for_patient,
     save_differential_diagnoses,
+    create_clinical_dump,
+    update_clinical_dump,
+    get_clinical_dumps_for_patient,
+    get_clinical_dump,
+    verify_login,
+    create_telegram_session,
+    update_telegram_session,
+    get_active_telegram_session,
 )
 from prompts import (
     CONSULT_ANALYSIS_PROMPT,
@@ -67,6 +81,8 @@ from prompts import (
     SEARCH_REASONING_PROMPT,
 )
 from gemini_live import GeminiLive, TOOL_DECLARATIONS, TOOL_MAPPING
+from consult_transcription import ConsultTranscriber
+from slot_availability import get_available_slots, get_available_dates
 
 load_dotenv(override=True)
 
@@ -81,7 +97,53 @@ GEMINI_LIVE_MODEL = os.getenv("GEMINI_LIVE_MODEL", "gemini-2.5-flash-native-audi
 # Configure logging
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Parchi.ai API", version="1.0.0")
+# Telegram bot configuration
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_WEBHOOK_URL = os.getenv("TELEGRAM_WEBHOOK_URL", "")
+TELEGRAM_MODE = os.getenv("TELEGRAM_MODE", "polling")  # "polling" or "webhook"
+
+_telegram_bot = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Startup / shutdown lifecycle for the FastAPI app."""
+    global _telegram_bot
+
+    # -- Startup --
+    # Ensure Supabase Storage bucket exists
+    try:
+        from supabase_storage import ensure_bucket_exists
+        ensure_bucket_exists()
+    except Exception as e:
+        logger.warning("Could not ensure storage bucket: %s", e)
+
+    # Initialize Telegram bot
+    if TELEGRAM_BOT_TOKEN:
+        try:
+            from telegram_bot import TelegramIntakeBot
+            _telegram_bot = TelegramIntakeBot(TELEGRAM_BOT_TOKEN)
+            if TELEGRAM_MODE == "webhook" and TELEGRAM_WEBHOOK_URL:
+                await _telegram_bot.setup_webhook(TELEGRAM_WEBHOOK_URL)
+                logger.info("Telegram bot started in webhook mode")
+            else:
+                await _telegram_bot.start_polling()
+                logger.info("Telegram bot started in polling mode")
+        except Exception as e:
+            logger.error("Failed to start Telegram bot: %s", e)
+            _telegram_bot = None
+    else:
+        logger.info("TELEGRAM_BOT_TOKEN not set — Telegram bot disabled")
+
+    yield
+
+    # -- Shutdown --
+    if _telegram_bot:
+        await _telegram_bot.stop()
+        logger.info("Telegram bot stopped")
+
+
+app = FastAPI(title="Parchi.ai API", version="1.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -128,6 +190,11 @@ class AppointmentRequest(BaseModel):
     status: str = "scheduled"
 
 
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
 class PrescriptionRequest(BaseModel):
     patient_id: str
     medications: list[dict]  # [{name, dosage, frequency, duration, instructions}]
@@ -143,6 +210,13 @@ class NoteRequest(BaseModel):
 
 class MarkSeenRequest(BaseModel):
     appointment_id: str
+
+
+class SaveDumpRequest(BaseModel):
+    dump_id: str
+    manual_notes: str = ""
+    appointment_id: str | None = None
+    analyze: bool = True
 
 
 class PatientRequest(BaseModel):
@@ -163,6 +237,17 @@ class PatientRequest(BaseModel):
 # --- Helper Functions ---
 
 
+def safe_list_to_string(value) -> str:
+    """Safely convert a list (or other type) to a comma-separated string."""
+    if value is None:
+        return "None"
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (list, tuple)):
+        return ", ".join(str(v) for v in value if v)
+    return str(value)
+
+
 def build_patient_context(patient_id: str) -> dict:
     """Build full patient context for LLM prompts."""
     patient = get_patient(patient_id)
@@ -172,12 +257,14 @@ def build_patient_context(patient_id: str) -> dict:
     documents = get_documents_for_patient(patient_id)
     visits = get_visits_for_patient(patient_id)
     consults = get_consults_for_patient(patient_id)
+    clinical_dumps = get_clinical_dumps_for_patient(patient_id)
 
     return {
         "patient": patient,
         "documents": documents,
         "visits": visits,
         "consults": consults,
+        "clinical_dumps": clinical_dumps,
     }
 
 
@@ -197,6 +284,24 @@ async def generate_ai_response_async(prompt: str, max_tokens: int = 1000) -> str
         return "AI is not configured. Please set GOOGLE_API_KEY in your environment."
     return await llm.generate_async(prompt, max_tokens)
 
+
+
+# --- Routes: Auth ---
+
+
+@app.post("/login")
+def login(req: LoginRequest):
+    """Simple login endpoint."""
+    logger.info(f"Login attempt for user: {req.username}")
+    try:
+        is_valid = verify_login(req.username, req.password)
+        logger.info(f"Login result for {req.username}: {is_valid}")
+        if not is_valid:
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+        return {"success": True, "message": "Login successful"}
+    except Exception as e:
+        logger.error(f"Login error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # --- Routes: Health Check ---
@@ -322,11 +427,15 @@ def list_patients():
 
 @app.get("/patient/{patient_id}")
 def get_patient_details(patient_id: str):
-    """Return patient + related data."""
+    """Return patient + related data for the patient profile page."""
     patient = get_patient(patient_id)
     if not patient:
         raise HTTPException(status_code=404, detail="Patient not found")
 
+    # Get appointment summary list for patient page sidebar
+    appointments_summary = get_appointments_summary_for_patient(patient_id)
+    
+    # Full appointments for backward compatibility
     appointments = get_appointments_for_patient(patient_id)
     visits = get_visits_for_patient(patient_id)
     documents = get_documents_for_patient(patient_id)
@@ -334,13 +443,14 @@ def get_patient_details(patient_id: str):
     prescriptions = get_prescriptions_for_patient(patient_id)
     notes = get_notes_for_patient(patient_id)
     
-    # Get AI-generated data
+    # Get AI-generated data (patient-level for the profile)
     ai_intake = get_ai_intake_summary(patient_id)
     differential = get_differential_diagnosis(patient_id)
     report_insights = get_report_insights(patient_id)
 
     return {
         "patient": patient,
+        "appointments_summary": appointments_summary or [],  # For patient page list
         "appointments": sorted(appointments, key=lambda x: x.get("start_time", "")) if appointments else [],
         "visits": sorted(visits, key=lambda x: x.get("visit_time", ""), reverse=True) if visits else [],
         "documents": documents or [],
@@ -356,39 +466,57 @@ def get_patient_details(patient_id: str):
 @app.post("/patients")
 def create_new_patient(req: PatientRequest):
     """Create a new patient."""
-    patient_id = f"p-{uuid.uuid4().hex[:8]}"
-    
-    patient_data = {
-        "id": patient_id,
-        "name": req.name,
-    }
-    
-    # Add optional fields if provided
-    if req.age is not None:
-        patient_data["age"] = req.age
-    if req.gender:
-        patient_data["gender"] = req.gender
-    if req.phone:
-        patient_data["phone"] = req.phone
-    if req.email:
-        patient_data["email"] = req.email
-    if req.address:
-        patient_data["address"] = req.address
-    if req.height_cm is not None:
-        patient_data["height_cm"] = req.height_cm
-    if req.weight_kg is not None:
-        patient_data["weight_kg"] = req.weight_kg
-    if req.conditions:
-        patient_data["conditions"] = req.conditions
-    if req.medications:
-        patient_data["medications"] = req.medications
-    if req.allergies:
-        patient_data["allergies"] = req.allergies
-    if req.vitals:
-        patient_data["vitals"] = req.vitals
-    
-    patient = create_patient(patient_data)
-    return {"patient": patient}
+    try:
+        logger.info(f"Creating patient with name: {req.name}")
+        patient_id = f"p-{uuid.uuid4().hex[:8]}"
+        
+        patient_data = {
+            "id": patient_id,
+            "name": req.name,
+        }
+        
+        # Add optional fields if provided
+        # Note: Only including fields that exist in the current database schema
+        if req.age is not None:
+            patient_data["age"] = req.age
+        if req.gender:
+            patient_data["gender"] = req.gender
+        if req.phone:
+            patient_data["phone"] = req.phone
+        if req.email:
+            patient_data["email"] = req.email
+        if req.address:
+            patient_data["address"] = req.address
+        if req.height_cm is not None:
+            patient_data["height_cm"] = req.height_cm
+        if req.weight_kg is not None:
+            patient_data["weight_kg"] = req.weight_kg
+        if req.conditions:
+            patient_data["conditions"] = req.conditions
+        if req.medications:
+            patient_data["medications"] = req.medications
+        if req.allergies:
+            patient_data["allergies"] = req.allergies
+        if req.vitals:
+            patient_data["vitals"] = req.vitals
+        
+        logger.info(f"Patient data prepared: {patient_data}")
+        patient = create_patient(patient_data)
+        logger.info(f"Patient created successfully: {patient}")
+        
+        # Include the phone in the response even if not stored in DB yet
+        response_patient = {**patient}
+        if req.phone:
+            response_patient["phone"] = req.phone
+        if req.email:
+            response_patient["email"] = req.email
+        if req.address:
+            response_patient["address"] = req.address
+            
+        return {"patient": response_patient}
+    except Exception as e:
+        logger.error(f"Error creating patient: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to create patient: {str(e)}")
 
 # --- Routes: Search ---
 
@@ -449,9 +577,9 @@ async def search(req: SearchRequest):
             f"ID: {p['id']}\n"
             f"Name: {p['name']}\n"
             f"Age: {p.get('age', '?')}, Gender: {p.get('gender', '?')}\n"
-            f"Conditions: {', '.join(p.get('conditions', []))}\n"
-            f"Meds: {', '.join(p.get('medications', []))}\n"
-            f"Allergies: {', '.join(p.get('allergies', []))}\n"
+            f"Conditions: {safe_list_to_string(p.get('conditions'))}\n"
+            f"Meds: {safe_list_to_string(p.get('medications'))}\n"
+            f"Allergies: {safe_list_to_string(p.get('allergies'))}\n"
             f"Recent Appts: {recent_appts}\n"
             f"Last Visit: {last_visit[:200]}...\n"
             f"Documents: {doc_titles}\n"
@@ -576,6 +704,74 @@ def mark_patient_seen(req: MarkSeenRequest):
     return {"success": True, "appointment": updated}
 
 
+@app.get("/appointment/{appointment_id}")
+def get_appointment_page_data(appointment_id: str):
+    """Get full appointment details for the appointment page view.
+    Includes patient info, vitals, AI intake summary, differential diagnosis, etc.
+    """
+    appointment = get_appointment_with_details(appointment_id)
+    if not appointment:
+        raise HTTPException(status_code=404, detail="Appointment not found")
+    
+    patient = appointment.get("patients")
+    if not patient:
+        raise HTTPException(status_code=404, detail="Patient not found for appointment")
+    
+    patient_id = patient["id"]
+    
+    # Get appointment-specific AI data, falling back to patient-level if not found
+    ai_intake = get_ai_intake_summary_for_appointment(appointment_id)
+    if not ai_intake:
+        ai_intake = get_ai_intake_summary(patient_id)
+    
+    differential = get_differential_diagnosis_for_appointment(appointment_id)
+    if not differential:
+        differential = get_differential_diagnosis(patient_id)
+    
+    # Get additional data
+    documents = get_documents_for_patient(patient_id)
+    clinical_dumps = get_clinical_dumps_for_appointment(appointment_id)
+    report_insights = get_report_insights(patient_id)
+    
+    # Determine if this is an archived (completed) appointment
+    is_archived = appointment.get("status") == "completed"
+    
+    # Remove nested patients object and return flat structure
+    appointment_flat = {k: v for k, v in appointment.items() if k != "patients"}
+    
+    return {
+        "appointment": appointment_flat,
+        "patient": patient,
+        "ai_intake_summary": ai_intake,
+        "differential_diagnosis": differential or [],
+        "documents": documents or [],
+        "clinical_dumps": clinical_dumps or [],
+        "report_insights": report_insights,
+        "is_archived": is_archived,
+    }
+
+
+@app.post("/appointment/{appointment_id}/start")
+def start_appointment(appointment_id: str):
+    """Set appointment status to in-progress."""
+    appointment = get_appointment_with_details(appointment_id)
+    if not appointment:
+        raise HTTPException(status_code=404, detail="Appointment not found")
+    
+    updated = update_appointment(appointment_id, {"status": "in-progress"})
+    return {"success": True, "appointment": updated}
+
+
+@app.post("/appointment/{appointment_id}/complete")
+def complete_appointment(appointment_id: str):
+    """Mark appointment as completed."""
+    appointment = get_appointment_with_details(appointment_id)
+    if not appointment:
+        raise HTTPException(status_code=404, detail="Appointment not found")
+    
+    updated = update_appointment(appointment_id, {"status": "completed"})
+    return {"success": True, "appointment": updated}
+
 # --- Helpers: Consult ---
 
 
@@ -647,9 +843,9 @@ def stop_consult(session_id: str, req: ConsultStopRequest):
         patient_name=patient["name"],
         patient_age=patient.get("age", "Unknown"),
         patient_gender=patient.get("gender", "Unknown"),
-        conditions=", ".join(patient.get("conditions", [])) or "None",
-        medications=", ".join(patient.get("medications", [])) or "None",
-        allergies=", ".join(patient.get("allergies", [])) or "None",
+        conditions=safe_list_to_string(patient.get("conditions")),
+        medications=safe_list_to_string(patient.get("medications")),
+        allergies=safe_list_to_string(patient.get("allergies")),
         vitals=f"BP {vitals.get('bp_systolic', 'N/A')}/{vitals.get('bp_diastolic', 'N/A')}, SpO2 {vitals.get('spo2', 'N/A')}%, HR {vitals.get('heart_rate', 'N/A')}, Temp {vitals.get('temperature_f', 'N/A')}°F",
         transcript=req.transcript_text,
     )
@@ -698,9 +894,9 @@ async def transcribe_consult(session_id: str, file: UploadFile = File(...)):
         patient_name=patient["name"],
         patient_age=patient.get("age", "Unknown"),
         patient_gender=patient.get("gender", "Unknown"),
-        conditions=", ".join(patient.get("conditions", [])) or "None",
-        medications=", ".join(patient.get("medications", [])) or "None",
-        allergies=", ".join(patient.get("allergies", [])) or "None",
+        conditions=safe_list_to_string(patient.get("conditions")),
+        medications=safe_list_to_string(patient.get("medications")),
+        allergies=safe_list_to_string(patient.get("allergies")),
         vitals=f"BP {vitals.get('bp_systolic', 'N/A')}/{vitals.get('bp_diastolic', 'N/A')}, SpO2 {vitals.get('spo2', 'N/A')}%, HR {vitals.get('heart_rate', 'N/A')}, Temp {vitals.get('temperature_f', 'N/A')}°F",
         transcript=transcript_text,
     )
@@ -722,6 +918,233 @@ async def transcribe_consult(session_id: str, file: UploadFile = File(...)):
         "soap": insights.get("soap"),
         "insights": insights,
     }
+
+
+# --- Routes: Consult Live Transcription ---
+
+
+@app.websocket("/ws/consult-transcribe/{session_id}")
+async def consult_transcribe_websocket(websocket: WebSocket, session_id: str):
+    """WebSocket for live consult transcription via Gemini.
+    Binary messages = audio PCM, Text messages = JSON control events.
+    """
+    logger.info("[WS-Transcribe] ======== NEW CONNECTION ========")
+    logger.info("[WS-Transcribe] Session ID: %s", session_id)
+
+    await websocket.accept()
+    logger.info("[WS-Transcribe] ✓ WebSocket connection accepted")
+
+    # Validate session
+    logger.debug("[WS-Transcribe] Validating session...")
+    session = get_consult_session(session_id)
+    if not session:
+        logger.error("[WS-Transcribe] ✗ Session not found: %s", session_id)
+        await websocket.send_json({"type": "error", "error": "Consult session not found"})
+        await websocket.close()
+        return
+
+    patient_id = session["patient_id"]
+    logger.info("[WS-Transcribe] ✓ Session validated, patient_id: %s", patient_id)
+
+    # Create clinical dump record
+    dump_id = f"cd-{uuid.uuid4().hex[:8]}"
+    logger.debug("[WS-Transcribe] Creating clinical dump: %s", dump_id)
+    create_clinical_dump({
+        "id": dump_id,
+        "patient_id": patient_id,
+        "consult_session_id": session_id,
+    })
+
+    await websocket.send_json({"type": "session_info", "dump_id": dump_id})
+    logger.info("[WS-Transcribe] ✓ Session info sent to client")
+
+    audio_input_queue = asyncio.Queue()
+    accumulated_transcript = []
+
+    logger.info("[WS-Transcribe] Creating ConsultTranscriber...")
+    logger.debug("[WS-Transcribe] Config: model=%s, api_key=%s, project=%s",
+                 GEMINI_LIVE_MODEL, "***" if GOOGLE_API_KEY else None, GCP_PROJECT_ID)
+
+    transcriber = ConsultTranscriber(
+        project_id=GCP_PROJECT_ID,
+        location=GCP_LOCATION,
+        model=GEMINI_LIVE_MODEL,
+        input_sample_rate=16000,
+        api_key=GOOGLE_API_KEY,
+    )
+    logger.info("[WS-Transcribe] ✓ ConsultTranscriber created")
+
+    stop_event = asyncio.Event()
+
+    async def receive_from_client():
+        try:
+            logger.debug("[WS-Transcribe] receive_from_client: Starting")
+            while not stop_event.is_set():
+                message = await websocket.receive()
+                if message.get("bytes"):
+                    bytes_len = len(message["bytes"])
+                    logger.debug("[WS-Transcribe] Received %d bytes of audio", bytes_len)
+                    await audio_input_queue.put(message["bytes"])
+                elif message.get("text"):
+                    try:
+                        data = json.loads(message["text"])
+                        logger.debug("[WS-Transcribe] Received text message: %s", data.get("type"))
+                        if data.get("type") == "stop":
+                            logger.info("[WS-Transcribe] Stop signal received")
+                            stop_event.set()
+                            await audio_input_queue.put(None)  # Sentinel
+                        elif data.get("type") == "manual_note":
+                            note_text = data.get("text", "")
+                            if note_text:
+                                logger.debug("[WS-Transcribe] Manual note: %s", note_text[:50])
+                                accumulated_transcript.append(f"[Note: {note_text}]")
+                                await websocket.send_json({
+                                    "type": "manual_note_ack",
+                                    "text": note_text,
+                                })
+                    except json.JSONDecodeError as e:
+                        logger.warning("[WS-Transcribe] JSON decode error: %s", e)
+        except WebSocketDisconnect:
+            logger.info("[WS-Transcribe] Client disconnected")
+            stop_event.set()
+            await audio_input_queue.put(None)
+        except Exception as e:
+            logger.error("[WS-Transcribe] Receive error: %s", e, exc_info=True)
+            stop_event.set()
+
+    logger.debug("[WS-Transcribe] Creating receive_from_client task")
+    receive_task = asyncio.create_task(receive_from_client())
+
+    logger.info("[WS-Transcribe] Starting Gemini transcription session...")
+    try:
+        async for event in transcriber.start_session(audio_input_queue=audio_input_queue):
+            logger.debug("[WS-Transcribe] Received event from transcriber: %s",
+                        event.get("type") if isinstance(event, dict) else event)
+            if event and event.get("type") == "transcript":
+                logger.info("[WS-Transcribe] ✓ Transcript: %s", event["text"])
+                accumulated_transcript.append(event["text"])
+                await websocket.send_json(event)
+            elif event and event.get("type") == "error":
+                logger.error("[WS-Transcribe] ✗ Error event: %s", event.get("error"))
+                await websocket.send_json(event)
+                break
+    except WebSocketDisconnect:
+        logger.info("[WS-Transcribe] Client disconnected during transcription")
+    except Exception as e:
+        logger.error("[WS-Transcribe] Transcription error: %s", e)
+        logger.error(traceback.format_exc())
+
+        # Classify error and send user-friendly message to client
+        err_str = str(e).lower()
+        if "api key" in err_str or "authenticate" in err_str or "permission" in err_str or "403" in err_str:
+            user_msg = "Authentication failed. Please check your GOOGLE_API_KEY or set up GCP credentials."
+        elif "not found" in err_str or "404" in err_str or "model" in err_str:
+            user_msg = f"Model not found: {GEMINI_LIVE_MODEL}. This model may require Vertex AI access."
+        elif "quota" in err_str or "rate" in err_str or "429" in err_str:
+            user_msg = "API quota exceeded. Please try again later."
+        elif "connect" in err_str or "timeout" in err_str or "network" in err_str:
+            user_msg = "Network error connecting to Gemini API."
+        else:
+            user_msg = f"Transcription error: {e}"
+
+        try:
+            await websocket.send_json({"type": "error", "error": user_msg})
+        except Exception:
+            pass
+    finally:
+        receive_task.cancel()
+
+        # Persist accumulated transcript
+        full_transcript = " ".join(accumulated_transcript)
+        if full_transcript.strip():
+            update_clinical_dump(dump_id, {
+                "transcript_text": full_transcript,
+                "updated_at": datetime.now().isoformat(),
+            })
+            update_consult_session(session_id, {
+                "transcript_text": full_transcript,
+            })
+
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+        logger.info("[WS-Transcribe] Handler finished for session %s", session_id)
+
+
+@app.post("/consult/{session_id}/save-dump")
+async def save_consult_dump(session_id: str, req: SaveDumpRequest):
+    """Save and optionally analyze a clinical dump (transcript + manual notes)."""
+    session = get_consult_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Consult session not found")
+
+    dump = get_clinical_dump(req.dump_id)
+    if not dump:
+        raise HTTPException(status_code=404, detail="Clinical dump not found")
+
+    patient_id = session["patient_id"]
+    transcript_text = dump.get("transcript_text", "") or ""
+    manual_notes = req.manual_notes or ""
+
+    # Build combined dump
+    parts = []
+    if transcript_text.strip():
+        parts.append(f"[Transcript]\n{transcript_text}")
+    if manual_notes.strip():
+        parts.append(f"[Manual Notes]\n{manual_notes}")
+    combined_dump = "\n\n".join(parts)
+
+    # Update the dump record
+    dump_updates = {
+        "manual_notes": manual_notes,
+        "combined_dump": combined_dump,
+        "updated_at": datetime.now().isoformat(),
+    }
+    if req.appointment_id:
+        dump_updates["appointment_id"] = req.appointment_id
+
+    update_clinical_dump(req.dump_id, dump_updates)
+
+    result = {"dump_id": req.dump_id, "combined_dump": combined_dump}
+
+    # Optionally analyze
+    if req.analyze and combined_dump.strip():
+        patient = get_patient(patient_id)
+        if patient:
+            vitals = patient.get("vitals", {})
+            prompt = CONSULT_ANALYSIS_PROMPT.format(
+                patient_name=patient["name"],
+                patient_age=patient.get("age", "Unknown"),
+                patient_gender=patient.get("gender", "Unknown"),
+                conditions=safe_list_to_string(patient.get("conditions")),
+                medications=safe_list_to_string(patient.get("medications")),
+                allergies=safe_list_to_string(patient.get("allergies")),
+                vitals=f"BP {vitals.get('bp_systolic', 'N/A')}/{vitals.get('bp_diastolic', 'N/A')}, SpO2 {vitals.get('spo2', 'N/A')}%, HR {vitals.get('heart_rate', 'N/A')}, Temp {vitals.get('temperature_f', 'N/A')}°F",
+                transcript=combined_dump,
+            )
+            raw_response = await generate_ai_response_async(prompt, max_tokens=2000)
+            insights = _parse_consult_insights(raw_response, combined_dump)
+
+            update_consult_session(session_id, {
+                "ended_at": datetime.now().isoformat(),
+                "transcript_text": combined_dump,
+                "soap_note": insights.get("soap"),
+                "insights_json": insights,
+            })
+            result["insights"] = insights
+
+    return result
+
+
+@app.get("/clinical-dumps/{patient_id}")
+def list_clinical_dumps(patient_id: str):
+    """Get all clinical dumps for a patient."""
+    patient = get_patient(patient_id)
+    if not patient:
+        raise HTTPException(status_code=404, detail="Patient not found")
+    dumps = get_clinical_dumps_for_patient(patient_id)
+    return {"clinical_dumps": dumps}
 
 
 # --- Routes: Chat ---
@@ -761,15 +1184,23 @@ def chat(req: ChatRequest):
         consult_parts.append("\n".join(lines))
     consult_texts = "\n\n".join(consult_parts) if consult_parts else "No recent consult sessions."
 
+    # Build clinical dump summaries
+    dump_parts = []
+    for d in ctx.get("clinical_dumps", []):
+        text = d.get("combined_dump") or d.get("transcript_text") or ""
+        if text:
+            dump_parts.append(f"--- Dump {d.get('created_at', 'Unknown')} ---\n{text[:1000]}")
+    dump_texts = "\n\n".join(dump_parts) if dump_parts else "No clinical dumps."
+
     system_prompt = PATIENT_QA_PROMPT.format(
         patient_name=patient["name"],
         patient_age=patient.get("age", "Unknown"),
         patient_gender=patient.get("gender", "Unknown"),
         height_cm=patient.get("height_cm", "N/A"),
         weight_kg=patient.get("weight_kg", "N/A"),
-        conditions=", ".join(patient.get("conditions", [])) or "None",
-        medications=", ".join(patient.get("medications", [])) or "None",
-        allergies=", ".join(patient.get("allergies", [])) or "None",
+        conditions=safe_list_to_string(patient.get("conditions")),
+        medications=safe_list_to_string(patient.get("medications")),
+        allergies=safe_list_to_string(patient.get("allergies")),
         bp=f"{vitals.get('bp_systolic', 'N/A')}/{vitals.get('bp_diastolic', 'N/A')}",
         spo2=vitals.get("spo2", "N/A"),
         hr=vitals.get("heart_rate", "N/A"),
@@ -777,6 +1208,7 @@ def chat(req: ChatRequest):
         documents=doc_texts,
         visits=visit_texts,
         consults=consult_texts,
+        clinical_dumps=dump_texts,
     )
 
     # Build conversation history
@@ -880,6 +1312,15 @@ async def generate_ai_summary_stream(patient_id: str):
                 consult_parts.append("\n".join(parts))
             consult_texts = "\n".join(consult_parts) or "No past consult transcripts."
 
+            # Fetch clinical dumps for richer context
+            clinical_dumps = get_clinical_dumps_for_patient(patient_id)
+            dump_parts = []
+            for d in clinical_dumps[:5]:
+                text = d.get("combined_dump") or d.get("transcript_text") or ""
+                if text:
+                    dump_parts.append(f"- Dump {d.get('created_at', 'Unknown')}: {text[:500]}")
+            dump_texts = "\n".join(dump_parts) or "No clinical dumps."
+
             full_context = f"""
 **Patient Profile:**
 {patient_profile}
@@ -892,6 +1333,9 @@ async def generate_ai_summary_stream(patient_id: str):
 
 **Past Consult Transcripts:**
 {consult_texts}
+
+**Clinical Dumps (Raw transcripts & notes):**
+{dump_texts}
 """
             
             yield emit("success", "✓ Context prepared")
@@ -1011,7 +1455,7 @@ async def generate_differential_diagnosis(patient_id: str):
         if appointments:
             chief_complaint = appointments[0].get("reason", "Not recorded")
 
-    history = f"Conditions: {', '.join(patient.get('conditions', []))}\nMedications: {', '.join(patient.get('medications', []))}"
+    history = f"Conditions: {safe_list_to_string(patient.get('conditions'))}\nMedications: {safe_list_to_string(patient.get('medications'))}"
     findings = ai_intake.get("findings", []) if ai_intake else []
     findings_str = "\n".join(findings) if isinstance(findings, list) else str(findings)
 
@@ -1023,10 +1467,17 @@ async def generate_differential_diagnosis(patient_id: str):
             facts = insights_json.get("extracted_facts", {})
             symptoms = facts.get("symptoms", [])
             if symptoms:
-                findings_str += "\nConsult-reported symptoms: " + ", ".join(symptoms)
+                findings_str += "\nConsult-reported symptoms: " + safe_list_to_string(symptoms)
             duration = facts.get("duration", "")
             if duration:
                 findings_str += f"\nDuration: {duration}"
+
+    # Enrich findings with clinical dump content
+    clinical_dumps = get_clinical_dumps_for_patient(patient_id)
+    for d in clinical_dumps[:3]:
+        text = d.get("combined_dump") or d.get("transcript_text") or ""
+        if text:
+            findings_str += f"\nClinical dump: {text[:300]}"
 
     # 2. Step 1: Generate Candidates
     candidates_prompt = DIFFERENTIAL_CANDIDATES_PROMPT.format(
@@ -1212,6 +1663,35 @@ async def upload_document(
     })
     return {"document": document, "extracted_text_length": len(extracted_text)}
 
+
+
+# --- Routes: Telegram Webhook ---
+
+
+@app.post("/webhook/telegram")
+async def telegram_webhook(request: Request):
+    """Receive Telegram updates via webhook."""
+    if not _telegram_bot:
+        raise HTTPException(status_code=503, detail="Telegram bot not initialized")
+    update_data = await request.json()
+    await _telegram_bot.process_update(update_data)
+    return {"ok": True}
+
+
+# --- Routes: Slot Availability ---
+
+
+@app.get("/slots/available")
+def list_available_slots(date: str | None = None):
+    """Get available appointment slots.
+    If date is provided (YYYY-MM-DD), returns slots for that date.
+    Otherwise returns available dates.
+    """
+    if date:
+        slots = get_available_slots(date)
+        return {"date": date, "slots": slots}
+    dates = get_available_dates()
+    return {"dates": dates}
 
 
 if __name__ == "__main__":

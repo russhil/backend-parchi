@@ -89,9 +89,13 @@ def search_patients(query: str) -> list[dict]:
 
 def create_patient(patient_data: dict) -> dict:
     """Create a new patient."""
-    client = get_supabase()
-    result = client.table("patients").insert(patient_data).execute()
-    return result.data[0] if result.data else {}
+    try:
+        client = get_supabase()
+        result = client.table("patients").insert(patient_data).execute()
+        return result.data[0] if result.data else {}
+    except Exception as e:
+        print(f"Error creating patient: {str(e)}")
+        raise
 
 
 def update_patient(patient_id: str, updates: dict) -> dict:

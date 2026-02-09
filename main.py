@@ -85,7 +85,7 @@ app = FastAPI(title="Parchi.ai API", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:3001", "http://127.0.0.1:3001", "http://localhost:3002", "http://127.0.0.1:3002"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -368,6 +368,12 @@ def create_new_patient(req: PatientRequest):
         patient_data["age"] = req.age
     if req.gender:
         patient_data["gender"] = req.gender
+    if req.phone:
+        patient_data["phone"] = req.phone
+    if req.email:
+        patient_data["email"] = req.email
+    if req.address:
+        patient_data["address"] = req.address
     if req.height_cm is not None:
         patient_data["height_cm"] = req.height_cm
     if req.weight_kg is not None:

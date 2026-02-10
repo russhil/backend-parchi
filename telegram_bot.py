@@ -573,6 +573,8 @@ class TelegramIntakeBot:
 
     async def setup_webhook(self, webhook_url: str) -> None:
         """Set the Telegram webhook URL (for production)."""
+        await self.app.initialize()
+        await self.app.start()
         await self.app.bot.set_webhook(url=webhook_url)
         try:
             await self._set_bot_commands()

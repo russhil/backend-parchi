@@ -111,6 +111,10 @@ async def lifespan(app: FastAPI):
     global _telegram_bot
 
     # -- Startup --
+    logger.info("Starting backend with PORT=%s", os.environ.get("PORT", "8000"))
+    logger.info("Telegram configuration: MODE=%s, HAS_TOKEN=%s, WEBHOOK_URL_SET=%s", 
+                TELEGRAM_MODE, bool(TELEGRAM_BOT_TOKEN), bool(TELEGRAM_WEBHOOK_URL))
+
     # Ensure Supabase Storage bucket exists
     try:
         from supabase_storage import ensure_bucket_exists
@@ -145,9 +149,15 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Parchi.ai API", version="1.0.0", lifespan=lifespan)
 
+_cors_origins = os.getenv("CORS_ORIGINS", "").split(",") if os.getenv("CORS_ORIGINS") else [
+    "http://localhost:3000", "http://127.0.0.1:3000",
+    "http://localhost:3001", "http://127.0.0.1:3001",
+    "http://localhost:3002", "http://127.0.0.1:3002",
+]
+# In production, set CORS_ORIGINS=* or to your frontend URL
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:3001", "http://127.0.0.1:3001", "http://localhost:3002", "http://127.0.0.1:3002"],
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -1696,4 +1706,6 @@ def list_available_slots(date: str | None = None):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
+

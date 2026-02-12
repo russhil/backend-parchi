@@ -8,7 +8,7 @@ from database import get_supabase
 
 logger = logging.getLogger(__name__)
 
-BUCKET_NAME = "patient-documents"
+BUCKET_NAME = "documents"
 
 
 def ensure_bucket_exists() -> None:

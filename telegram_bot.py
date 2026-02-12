@@ -34,6 +34,7 @@ from database import (
 )
 from slot_availability import get_available_dates, get_available_slots
 from supabase_storage import upload_file
+from ocr_utils import extract_text_from_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -65,26 +66,7 @@ class IntakeSession(BaseModel):
 # OCR helper
 # ---------------------------------------------------------------------------
 
-def extract_text_from_file(content: bytes, filename: str, content_type: str = "") -> str:
-    """Extract text from a file using OCR (images) or pdfplumber (PDFs)."""
-    try:
-        if content_type == "application/pdf" or filename.lower().endswith(".pdf"):
-            import pdfplumber
-            with pdfplumber.open(io.BytesIO(content)) as pdf:
-                parts = [page.extract_text() or "" for page in pdf.pages]
-                return "\n\n".join(p for p in parts if p)
 
-        if content_type.startswith("image/") or any(
-            filename.lower().endswith(ext) for ext in (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff")
-        ):
-            import pytesseract
-            from PIL import Image
-            image = Image.open(io.BytesIO(content))
-            return pytesseract.image_to_string(image)
-
-        return content.decode("utf-8", errors="ignore")
-    except Exception as e:
-        return f"[extraction error: {e}]"
 
 
 # ---------------------------------------------------------------------------
@@ -339,7 +321,7 @@ class TelegramIntakeBot:
             file_url = ""
 
         # OCR
-        extracted_text = extract_text_from_file(file_bytes, filename, content_type)
+        extracted_text = extract_text_from_bytes(file_bytes, filename, content_type)
         extracted_text = extracted_text[:10000]
 
         session.uploaded_files.append({

@@ -20,7 +20,6 @@ from database import (
     get_documents_for_patient,
     get_prescriptions_for_patient,
     get_clinical_dumps_for_patient,
-    search_patients,
     get_ai_intake_summary,
     get_differential_diagnosis,
     get_report_insights,
@@ -28,10 +27,6 @@ from database import (
     get_consults_for_patient,
 )
 
-from prompts import (
-    SEARCH_CANDIDATES_PROMPT,
-    SEARCH_REASONING_PROMPT,
-)
 from llm_provider import get_llm
 
 logger = logging.getLogger(__name__)
@@ -155,106 +150,144 @@ TOOL_DECLARATIONS = [
 ]
 
 
+def _safe_list_to_string(value) -> str:
+    """Safely convert a list (or other type) to a comma-separated string."""
+    if value is None:
+        return "None"
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (list, tuple)):
+        return ", ".join(str(v) for v in value if v)
+    return str(value)
+
+
 def _build_search_context_sync(query: str) -> str:
-    """Synchronous helper to build search context without blocking event loop."""
-    # 1. Fast Text Search first (using the comprehensive DB search)
-    # This searches Name, Arrays, Dumps, Notes, Visits, Reports, Intake
-    text_candidates = search_patients(query)
-    
-    candidate_ids = set()
+    """
+    Build comprehensive search context matching the Smart Search approach.
+    Uses batch queries (not per-patient) to stay fast enough for Gemini Live.
+    Fetches all patients with visits, documents, and appointments so the AI
+    can do semantic matching (e.g. 'heart issues' -> 'cardiac').
+    """
+    from database import get_supabase
+
+    client = get_supabase()
+
+    all_patients = get_all_patients()
+    if not all_patients:
+        return ""
+
+    # Batch-fetch all related data in a few queries (not per-patient)
+    all_appointments = (
+        client.table("appointments")
+        .select("patient_id, start_time, reason, status")
+        .execute().data or []
+    )
+    all_visits = (
+        client.table("visits")
+        .select("patient_id, summary_ai")
+        .order("visit_time", desc=True)
+        .execute().data or []
+    )
+    all_docs = (
+        client.table("documents")
+        .select("patient_id, title")
+        .execute().data or []
+    )
+
+    # Build maps keyed by patient_id
+    appt_map: dict[str, list[str]] = {}
+    for appt in all_appointments:
+        pid = appt.get("patient_id")
+        if not pid:
+            continue
+        if pid not in appt_map:
+            appt_map[pid] = []
+        try:
+            date_str = (appt.get("start_time") or "").split("T")[0]
+        except Exception:
+            date_str = "?"
+        reason = appt.get("reason") or "No reason"
+        status = appt.get("status") or "unknown"
+        appt_map[pid].append(f"{date_str}: {reason} ({status})")
+
+    # First visit per patient (already ordered desc)
+    visit_map: dict[str, str] = {}
+    for v in all_visits:
+        pid = v.get("patient_id")
+        if pid and pid not in visit_map:
+            visit_map[pid] = (v.get("summary_ai") or "")[:200]
+
+    doc_map: dict[str, list[str]] = {}
+    for d in all_docs:
+        pid = d.get("patient_id")
+        if not pid:
+            continue
+        if pid not in doc_map:
+            doc_map[pid] = []
+        doc_map[pid].append(d.get("title") or "Untitled")
+
+    # Build summaries
     patient_summaries = []
-    
-    # Add text match candidates first (High Priority)
-    for r in text_candidates:
-        candidate_ids.add(r['patient_id'])
-        summary = f"ID: {r['patient_id']}\nName: {r['patient_name']}\nMATCH: {', '.join(r.get('matched_snippets', []))}\n---"
-        patient_summaries.append(summary)
-    
-    # 2. If we have few results (< 5), fetch all patients for semantic search fallback
-    # This ensures we don't miss "heart issues" -> "cardiac" semantic matches that text search misses
-    if len(candidate_ids) < 5:
-        all_patients = get_all_patients()
-        for p in all_patients:
-            if p["id"] in candidate_ids:
-                continue
-            
-            # Lightweight context fetch for semantic fallback
-            conditions = ", ".join(p.get("conditions") or [])
-            medications = ", ".join(p.get("medications") or [])
-            intake = get_ai_intake_summary(p["id"])
-            intake_text = (intake.get("summary_text") or "") if intake else ""
-            
-            summary = (
-                f"ID: {p['id']}\nName: {p['name']}\n"
-                f"Conditions: {conditions}\n"
-                f"Meds: {medications}\n"
-                f"Intake: {intake_text[:100]}\n---"
-            )
-            patient_summaries.append(summary)
-            
-    return "\n".join(patient_summaries[:20]) # Limit to 20 to fit context
+    for p in all_patients:
+        pid = p["id"]
+        p_name = p.get("name") or "Unknown"
+        p_appts = appt_map.get(pid, [])
+        recent_appts = " | ".join(p_appts[:3]) if p_appts else "No recent appointments"
+        last_visit = visit_map.get(pid, "No visits")
+        doc_titles = ", ".join(doc_map.get(pid, [])[:3])
+
+        context = (
+            f"ID: {pid}\n"
+            f"Name: {p_name}\n"
+            f"Age: {p.get('age', '?')}, Gender: {p.get('gender', '?')}\n"
+            f"Conditions: {_safe_list_to_string(p.get('conditions'))}\n"
+            f"Meds: {_safe_list_to_string(p.get('medications'))}\n"
+            f"Allergies: {_safe_list_to_string(p.get('allergies'))}\n"
+            f"Recent Appts: {recent_appts}\n"
+            f"Last Visit: {last_visit}\n"
+            f"Documents: {doc_titles}\n"
+            "---"
+        )
+        patient_summaries.append(context)
+
+    return "\n".join(patient_summaries[:20])
 
 
 async def _tool_search_patients(query: str):
-    """Smart AI Search for patients."""
-    # 1. Build context in a separate thread to avoid blocking WebSocket loop
-    full_context_str = await asyncio.to_thread(_build_search_context_sync, query)
-    
-    if not full_context_str:
-        return "No patients found in the database."
-
-    # 2. AI Selection & Reasoning
-    prompt = SEARCH_CANDIDATES_PROMPT.format(
-        query=query,
-        patient_summaries=full_context_str
-    )
-    
-    llm = get_llm()
-    if not llm:
-        return "Search unavailable: AI not configured."
-
-    response_text = await llm.generate_async(prompt, max_tokens=500)
-    
+    """Smart AI Search for patients — single LLM call for speed."""
     try:
-        text = response_text.replace("```json", "").replace("```", "").strip()
-        start = text.find("[")
-        end = text.rfind("]") + 1
-        candidate_ids = json.loads(text[start:end])
-    except:
-        candidate_ids = []
+        # 1. Build context in a thread (batch DB queries, fast)
+        full_context_str = await asyncio.to_thread(_build_search_context_sync, query)
 
-    if not candidate_ids:
-        # If AI returns nothing, check if we had strong text matches in the context
-        # We can re-run looking for "MATCH:" lines in our context buffer as a fallback
-        if "MATCH:" in full_context_str:
-             return "I found some potential matches based on keywords:\n" + full_context_str
-        return f"No patients found matching '{query}'."
+        if not full_context_str:
+            return "No patients found in the database."
 
-    # 3. Generate Reasoning for selected candidates
-    # We can skip a second LLM call if we want speed, OR make it parallel
-    results = []
-    
-    async def get_reasoning(pid):
-        # We need patient name for the output. 
-        # Ideally we'd have a map, but for now let's just fetch the minimal info 
-        # or parse it from the context string if we were clever. 
-        # Safer to just do a quick DB fetch or rely on what we have.
-        # Speed hack: just return the ID and Name processing later? 
-        # Let's do a fast fetch.
-        p = await asyncio.to_thread(get_patient, pid)
-        if not p: return None
-        
-        reason_prompt = SEARCH_REASONING_PROMPT.format(
-            patient_context=f"Name: {p['name']}, Conditions: {p.get('conditions')}",
-            query=query
+        # 2. Single LLM call: pick candidates AND explain why (no second round-trip)
+        prompt = (
+            f"You are a medical search assistant.\n"
+            f"Find patients relevant to: \"{query}\"\n\n"
+            f"Patients:\n{full_context_str}\n\n"
+            f"Return ONLY matching patients, one per line, format:\n"
+            f"Name (ID: <id>): <one-sentence reason>\n"
+            f"If none match, say \"No matches found.\""
         )
-        reason = await llm.generate_async(reason_prompt, max_tokens=60)
-        return f"{p['name']} (ID: {pid}): {reason.strip().replace('\"', '')}"
 
-    tasks = [get_reasoning(pid) for pid in candidate_ids]
-    reasoning_results = await asyncio.gather(*tasks)
-    
-    return "\n".join([r for r in reasoning_results if r])
+        llm = get_llm()
+        if not llm:
+            return "Search unavailable: AI not configured."
+
+        result = await asyncio.wait_for(
+            llm.generate_async(prompt, max_tokens=400),
+            timeout=15.0,
+        )
+        return result.strip() if result else f"No patients found matching '{query}'."
+
+    except asyncio.TimeoutError:
+        logger.warning("search_patients timed out for query: %s", query)
+        return "Search took too long. Try a more specific query."
+    except Exception as e:
+        logger.error("search_patients error: %s", e, exc_info=True)
+        return f"Search error: {e}"
 
 
 def _tool_get_patient_details(patient_id: str):

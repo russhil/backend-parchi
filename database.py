@@ -68,25 +68,29 @@ def search_patients(query: str) -> list[dict]:
 
     # 1. Search Patients Table (Memory-based for arrays)
     patients = client.table("patients").select("*").execute().data or []
-    patient_map = {p["id"]: p["name"] for p in patients}
+    patient_map = {p["id"]: (p.get("name") or "Unknown") for p in patients}
 
     for p in patients:
         pid = p["id"]
-        p_name = p["name"]
-        
+        p_name = p.get("name") or "Unknown"
+
         # Name
         if query_lower in p_name.lower():
             add_match(pid, p_name, f"Name match: {p_name}")
-        
-        # Arrays
+
+        # Phone
+        if p.get("phone") and query_lower in str(p["phone"]).lower():
+            add_match(pid, p_name, f"Phone match: {p['phone']}")
+
+        # Arrays (guard against None items)
         for cond in (p.get("conditions") or []):
-            if query_lower in cond.lower():
+            if cond and query_lower in str(cond).lower():
                 add_match(pid, p_name, f"Condition: {cond}")
         for med in (p.get("medications") or []):
-            if query_lower in med.lower():
+            if med and query_lower in str(med).lower():
                 add_match(pid, p_name, f"Medication: {med}")
         for allergy in (p.get("allergies") or []):
-            if query_lower in allergy.lower():
+            if allergy and query_lower in str(allergy).lower():
                 add_match(pid, p_name, f"Allergy: {allergy}")
 
     # 2. Search Clinical Dumps
@@ -105,10 +109,11 @@ def search_patients(query: str) -> list[dict]:
     for n in notes:
         pid = n["patient_id"]
         if pid not in patient_map: continue
-        
-        if query_lower in n.get("content", "").lower():
-            text = n["content"]
-            snippet = text[max(0, text.lower().find(query_lower)-30):min(len(text), text.lower().find(query_lower)+100)]
+
+        content = n.get("content") or ""
+        if query_lower in content.lower():
+            idx = content.lower().find(query_lower)
+            snippet = content[max(0, idx-30):min(len(content), idx+100)]
             add_match(pid, patient_map[pid], f"Note match: ...{snippet}...")
 
     # 4. Search Visits
@@ -165,7 +170,28 @@ def update_patient(patient_id: str, updates: dict) -> dict:
     return result.data[0] if result.data else {}
 
 
+
+def find_patient_duplicate(email: str = None, phone: str = None, name: str = None) -> Optional[dict]:
+    """Find patient by email, phone, or name (simple match)."""
+    client = get_supabase()
+    
+    # 1. Try Email
+    if email:
+        res = client.table("patients").select("*").eq("email", email).execute()
+        if res.data:
+            return res.data[0]
+            
+    # 2. Try Phone
+    if phone:
+        res = client.table("patients").select("*").eq("phone", phone).execute()
+        if res.data:
+            return res.data[0]
+
+    return None
+
+
 # --- Appointment Operations ---
+
 
 def get_appointments_for_patient(patient_id: str) -> list[dict]:
     """Fetch appointments for a specific patient."""
@@ -450,20 +476,24 @@ def get_differential_diagnosis(patient_id: str) -> list[dict]:
     return result.data or []
 
 
-def save_differential_diagnoses(patient_id: str, diagnoses: list[dict]) -> bool:
+def save_differential_diagnoses(patient_id: str, diagnoses: list[dict], appointment_id: str | None = None) -> bool:
     """Save new differential diagnoses, replacing old ones."""
     client = get_supabase()
     
-    # 1. Delete existing for patient
+    # 1. Delete existing for patient (and appointment if specified)
+    if appointment_id:
+        client.table("differential_diagnoses").delete().eq("appointment_id", appointment_id).execute()
     client.table("differential_diagnoses").delete().eq("patient_id", patient_id).execute()
     
     # 2. Insert new
     if not diagnoses:
         return True
 
-    # Ensure patient_id is set
+    # Ensure patient_id and appointment_id are set
     for d in diagnoses:
         d["patient_id"] = patient_id
+        if appointment_id:
+            d["appointment_id"] = appointment_id
         
     result = client.table("differential_diagnoses").insert(diagnoses).execute()
     return bool(result.data)
@@ -629,3 +659,37 @@ def verify_login(username: str, password_plain: str) -> bool:
         .execute()
     )
     return bool(result.data)
+
+
+# --- Intake Request (Token) Operations ---
+
+def create_intake_token(data: dict) -> dict:
+    """Create a new intake token."""
+    client = get_supabase()
+    result = client.table("intake_tokens").insert(data).execute()
+    return result.data[0] if result.data else {}
+
+
+def get_intake_token(token: str) -> Optional[dict]:
+    """Fetch intake token details."""
+    client = get_supabase()
+    result = (
+        client.table("intake_tokens")
+        .select("*, patients(*), appointments(*)")
+        .eq("token", token)
+        .execute()
+    )
+    return result.data[0] if result.data else None
+
+
+def update_intake_token(token: str, updates: dict) -> dict:
+    """Update intake token."""
+    client = get_supabase()
+    result = (
+        client.table("intake_tokens")
+        .update(updates)
+        .eq("token", token)
+        .execute()
+    )
+    return result.data[0] if result.data else {}
+

@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS documents (
     title TEXT NOT NULL,
     doc_type TEXT DEFAULT 'general',
     extracted_text TEXT,
+    file_url TEXT,
     uploaded_at TIMESTAMPTZ DEFAULT NOW()
 );
 

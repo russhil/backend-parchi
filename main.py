@@ -8,7 +8,7 @@ import os
 import uuid
 import io
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import AsyncGenerator
 
 from dotenv import load_dotenv
@@ -28,6 +28,7 @@ from database import (
     get_all_patients,
     search_patients,
     create_patient,
+    update_patient,
     get_appointments_for_patient,
     get_todays_appointments,
     get_all_appointments,
@@ -63,8 +64,15 @@ from database import (
     verify_login,
     create_telegram_session,
     update_telegram_session,
+    update_telegram_session,
     get_active_telegram_session,
+    find_patient_duplicate,
+    create_intake_token,
+    get_intake_token,
+    update_intake_token,
+    get_supabase,
 )
+from supabase_storage import upload_file
 from prompts import (
     CONSULT_ANALYSIS_PROMPT,
     DIFFERENTIAL_CANDIDATES_PROMPT,
@@ -79,10 +87,12 @@ from prompts import (
     SUMMARY_CONTEXT_PROMPT,
     SEARCH_CANDIDATES_PROMPT,
     SEARCH_REASONING_PROMPT,
+    CHAT_SUGGESTIONS_PROMPT,
 )
 from gemini_live import GeminiLive, TOOL_DECLARATIONS, TOOL_MAPPING
 from consult_transcription import ConsultTranscriber
 from slot_availability import get_available_slots, get_available_dates
+from ocr_utils import extract_text_from_url, extract_text_from_bytes
 
 load_dotenv(override=True)
 
@@ -242,6 +252,78 @@ class PatientRequest(BaseModel):
     medications: list[str] = []
     allergies: list[str] = []
     vitals: dict = {}
+
+
+class IntakeCheckRequest(BaseModel):
+    name: str | None = None
+    email: str | None = None
+    phone: str | None = None
+    dob: str | None = None
+
+
+class IntakeOtpRequest(BaseModel):
+    email: str
+
+
+class IntakeVerifyRequest(BaseModel):
+    user_json_url: str
+
+class IntakeSubmitRequest(BaseModel):
+    # Patient Data
+    patient_id: str | None = None
+    name: str
+
+    dob: str
+    gender: str
+    phone: str
+    email: str
+    address: str
+    height_cm: float | None = None
+    weight_kg: float | None = None
+    conditions: list[str] = []
+    medications: list[str] = []
+    allergies: list[str] = []
+    history: str
+    
+    # Visit Data
+    reason: str
+    symptoms: str
+    
+    # Documents
+    documents: list[dict] = [] # [{url, name, type}]
+
+
+class SetupIntakeRequest(BaseModel):
+    phone: str
+    name: str
+    appointment_time: str
+    patient_id: str | None = None
+
+class IntakeTokenVerifyRequest(BaseModel):
+    token: str
+    user_json_url: str
+
+class IntakeTokenSubmitRequest(BaseModel):
+    token: str
+    
+    # Patient Data (Optional updates)
+    dob: str | None = None
+    gender: str | None = None
+    email: str | None = None
+    address: str | None = None
+    height_cm: float | None = None
+    weight_kg: float | None = None
+    conditions: list[str] = []
+    medications: list[str] = []
+    allergies: list[str] = []
+    history: str | None = None
+    
+    # Visit Data
+    reason: str
+    symptoms: str
+    
+    # Documents
+    documents: list[dict] = []
 
 
 # --- Helper Functions ---
@@ -738,6 +820,16 @@ def get_appointment_page_data(appointment_id: str):
     if not differential:
         differential = get_differential_diagnosis(patient_id)
     
+    # Map DB field names to frontend-friendly names
+    differential_mapped = [
+        {
+            "condition": d.get("condition_name", d.get("condition", "")),
+            "match_pct": d.get("match_pct", 0),
+            "reasoning": d.get("rationale", d.get("reasoning", "")),
+        }
+        for d in (differential or [])
+    ]
+    
     # Get additional data
     documents = get_documents_for_patient(patient_id)
     clinical_dumps = get_clinical_dumps_for_appointment(appointment_id)
@@ -753,7 +845,7 @@ def get_appointment_page_data(appointment_id: str):
         "appointment": appointment_flat,
         "patient": patient,
         "ai_intake_summary": ai_intake,
-        "differential_diagnosis": differential or [],
+        "differential_diagnosis": differential_mapped,
         "documents": documents or [],
         "clinical_dumps": clinical_dumps or [],
         "report_insights": report_insights,
@@ -1237,6 +1329,74 @@ def chat(req: ChatRequest):
     return {"reply": reply}
 
 
+@app.get("/ai/chat-suggestions/{patient_id}")
+async def generate_chat_suggestions(patient_id: str):
+    """Generate 3 contextual questions that a doctor would likely want to ask about this patient."""
+    patient = get_patient(patient_id)
+    if not patient:
+        raise HTTPException(status_code=404, detail="Patient not found")
+
+    # Get latest AI summary info if available
+    ai_intake = get_ai_intake_summary(patient_id)
+    # Get chief complaint or fallback
+    if ai_intake and ai_intake.get("chief_complaint"):
+        chief_complaint = ai_intake.get("chief_complaint")
+    else:
+        # Fallback to appointment reason
+        appointments = get_appointments_for_patient(patient_id)
+        if appointments:
+            chief_complaint = appointments[0].get("reason", "General checkup")
+        else:
+            chief_complaint = "General checkup"
+
+    findings = ai_intake.get("findings", []) if ai_intake else []
+    findings_str = ", ".join(findings) if isinstance(findings, list) else str(findings)
+
+    vitals = patient.get("vitals", {})
+
+    # Construct the prompt
+    prompt = CHAT_SUGGESTIONS_PROMPT.format(
+        patient_name=patient["name"],
+        patient_age=patient.get("age", "?"),
+        patient_gender=patient.get("gender", "?"),
+        conditions=safe_list_to_string(patient.get("conditions")),
+        medications=safe_list_to_string(patient.get("medications")),
+        allergies=safe_list_to_string(patient.get("allergies")),
+        bp=f"{vitals.get('bp_systolic', 'N/A')}/{vitals.get('bp_diastolic', 'N/A')}",
+        spo2=vitals.get("spo2", "N/A"),
+        hr=vitals.get("heart_rate", "N/A"),
+        temp=vitals.get("temperature_f", "N/A"),
+        chief_complaint=chief_complaint,
+        findings=findings_str
+    )
+
+    # Generate the response
+    raw_response = await generate_ai_response_async(prompt, max_tokens=250)
+    
+    # Parse line-separated suggestions
+    suggestions = []
+    try:
+        # Split by newlines and clean up
+        lines = [line.strip() for line in raw_response.split('\n') if line.strip()]
+        # Remove any potential numbering (e.g., "1. Question")
+        import re
+        suggestions = [re.sub(r'^\d+[\.\)\-]\s*', '', line) for line in lines]
+        # Filter out empty strings
+        suggestions = [s for s in suggestions if s]
+    except Exception:
+        pass
+    
+    # Fallback if AI fails or returns malformed data
+    if not suggestions:
+        suggestions = [
+            "Are there any drug interactions?",
+            "Summarize the recent findings",
+            "What is the recommended treatment plan?"
+        ]
+        
+    return {"suggestions": suggestions[:3]}
+
+
 # --- Routes: AI Summary Generation (SSE Streaming) ---
 
 
@@ -1372,7 +1532,7 @@ async def generate_ai_summary_stream(patient_id: str):
             onset_task = generate_ai_response_async(onset_prompt, max_tokens=50)
             severity_task = generate_ai_response_async(severity_prompt, max_tokens=50)
             findings_task = generate_ai_response_async(findings_prompt, max_tokens=300)
-            context_task = generate_ai_response_async(context_prompt, max_tokens=200)
+            context_task = generate_ai_response_async(context_prompt, max_tokens=400)
             
             onset, severity, findings_raw, context = await asyncio.gather(onset_task, severity_task, findings_task, context_task)
             
@@ -1438,27 +1598,19 @@ async def generate_ai_summary_stream(patient_id: str):
 
 
 @app.post("/ai/generate-differential/{patient_id}")
-async def generate_differential_diagnosis(patient_id: str):
+async def generate_differential_diagnosis(patient_id: str, appointment_id: str | None = None):
     """Generate differential diagnosis using 2-step AI process (Candidates -> Scoring)."""
-    
+    import re as _re
+
     # 1. Fetch Patient Context
     patient = get_patient(patient_id)
     if not patient:
         raise HTTPException(status_code=404, detail="Patient not found")
-        
-    visits = get_visits_for_patient(patient_id)
-    
-    # Build context string
-    patient_summary = f"""
-    Name: {patient['name']}
-    Age: {patient.get('age', '?')}
-    Gender: {patient.get('gender', '?')}
-    """
-    
+
     # Find latest Chief Complaint from AI Intake if available
     ai_intake = get_ai_intake_summary(patient_id)
     chief_complaint = ai_intake.get("chief_complaint", "Not recorded") if ai_intake else "Not recorded"
-    
+
     # Or try to find from appointments
     if chief_complaint == "Not recorded":
         appointments = get_appointments_for_patient(patient_id)
@@ -1489,7 +1641,11 @@ async def generate_differential_diagnosis(patient_id: str):
         if text:
             findings_str += f"\nClinical dump: {text[:300]}"
 
-    # 2. Step 1: Generate Candidates
+    logger.info("[Differential] Generating candidates for patient %s (appointment=%s)", patient_id, appointment_id)
+    logger.debug("[Differential] Chief complaint: %s", chief_complaint)
+    logger.debug("[Differential] Findings context: %s", findings_str[:200])
+
+    # ── Step 1: Generate Candidates ──
     candidates_prompt = DIFFERENTIAL_CANDIDATES_PROMPT.format(
         patient_name=patient['name'],
         patient_age=patient.get('age', '?'),
@@ -1498,24 +1654,35 @@ async def generate_differential_diagnosis(patient_id: str):
         history=history,
         findings=findings_str
     )
-    
-    raw_candidates = await generate_ai_response_async(candidates_prompt, max_tokens=200)
-    
-    # Parse List
+
+    raw_candidates = await generate_ai_response_async(candidates_prompt, max_tokens=300)
+    logger.debug("[Differential] Raw candidates response: %s", raw_candidates[:500])
+
+    # Robust parsing: try JSON first, then regex-extract quoted strings
+    candidate_list = []
     try:
-        # cleanup json
         text = raw_candidates.replace("```json", "").replace("```", "").strip()
-        start = text.find("[")
-        end = text.rfind("]") + 1
-        candidate_list = json.loads(text[start:end])
-    except:
-        candidate_list = ["Common Cold", "Flu", "Allergies"] # Fallback
-        
-    # 3. Step 2: Score Each Candidate
-    scored_results = []
-    import asyncio
-    
-    async def score_condition(cond):
+        bracket_start = text.find("[")
+        bracket_end = text.rfind("]") + 1
+        if bracket_start >= 0 and bracket_end > bracket_start:
+            candidate_list = json.loads(text[bracket_start:bracket_end])
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    if not candidate_list:
+        # Fallback: extract quoted strings from the response
+        candidate_list = _re.findall(r'"([^"]{3,60})"', raw_candidates)
+
+    if not candidate_list:
+        logger.warning("[Differential] Could not parse candidates, using context-based fallback")
+        candidate_list = ["Condition requiring further evaluation"]
+
+    # Limit to 5 candidates max
+    candidate_list = candidate_list[:5]
+    logger.info("[Differential] Parsed %d candidates: %s", len(candidate_list), candidate_list)
+
+    # ── Step 2: Score Each Candidate ──
+    async def score_condition(cond: str) -> dict:
         prompt = DIFFERENTIAL_SCORING_PROMPT.format(
             condition=cond,
             patient_name=patient['name'],
@@ -1525,35 +1692,62 @@ async def generate_differential_diagnosis(patient_id: str):
             history=history,
             findings=findings_str
         )
-        resp = await generate_ai_response_async(prompt, max_tokens=150)
+        resp = await generate_ai_response_async(prompt, max_tokens=250)
+        logger.debug("[Differential] Score response for '%s': %s", cond, resp[:300])
+
+        match_pct = 50
+        reasoning = "Analysis pending."
+
         try:
             text = resp.replace("```json", "").replace("```", "").strip()
-            start = text.find("{")
-            end = text.rfind("}") + 1
-            data = json.loads(text[start:end])
-            return {
-                "condition_name": data.get("condition", cond),
-                "match_pct": data.get("match_pct", 50),
-                "rationale": data.get("reasoning", "Analysis pending.")
-            }
-        except:
-             return {
-                "condition_name": cond,
-                "match_pct": 50,
-                "rationale": "Could not verify match percentage."
-            }
+            brace_start = text.find("{")
+            brace_end = text.rfind("}") + 1
+            if brace_start >= 0 and brace_end > brace_start:
+                data = json.loads(text[brace_start:brace_end])
+                match_pct = int(data.get("match_pct", 50))
+                reasoning = data.get("reasoning", reasoning)
+        except (json.JSONDecodeError, ValueError, TypeError):
+            # Regex fallback: extract match_pct number
+            pct_match = _re.search(r'match[_ ]?pct["\s:]+\s*(\d+)', resp, _re.IGNORECASE)
+            if pct_match:
+                match_pct = int(pct_match.group(1))
+            # Extract reasoning text
+            reason_match = _re.search(r'reasoning["\s:]+\s*"([^"]+)"', resp, _re.IGNORECASE)
+            if reason_match:
+                reasoning = reason_match.group(1)
 
-    # Run in parallel
+        # Clamp percentage
+        match_pct = max(0, min(100, match_pct))
+
+        return {
+            "condition_name": cond,
+            "match_pct": match_pct,
+            "rationale": reasoning,
+        }
+
+    # Run scoring in parallel
     tasks = [score_condition(c) for c in candidate_list]
     scored_results = await asyncio.gather(*tasks)
-    
+
     # Sort by match %
-    scored_results.sort(key=lambda x: x["match_pct"], reverse=True)
-    
-    # 4. Save to DB
-    save_differential_diagnoses(patient_id, scored_results)
-    
-    return {"status": "success", "data": scored_results}
+    scored_results = sorted(scored_results, key=lambda x: x["match_pct"], reverse=True)
+
+    logger.info("[Differential] Final results: %s", [(r["condition_name"], r["match_pct"]) for r in scored_results])
+
+    # ── Step 3: Save to DB ──
+    save_differential_diagnoses(patient_id, list(scored_results), appointment_id=appointment_id)
+
+    # Return with frontend-friendly field names
+    frontend_data = [
+        {
+            "condition": r["condition_name"],
+            "match_pct": r["match_pct"],
+            "reasoning": r["rationale"],
+        }
+        for r in scored_results
+    ]
+
+    return {"status": "success", "data": frontend_data}
 
 
 # --- Routes: Prescriptions ---
@@ -1628,40 +1822,8 @@ async def upload_document(
     content_type = file.content_type or ""
     filename = file.filename or ""
     
-    try:
-        # Handle PDF files
-        if content_type == "application/pdf" or filename.lower().endswith(".pdf"):
-            try:
-                import pdfplumber
-                with pdfplumber.open(io.BytesIO(content)) as pdf:
-                    text_parts = []
-                    for page in pdf.pages:
-                        page_text = page.extract_text()
-                        if page_text:
-                            text_parts.append(page_text)
-                    extracted_text = "\n\n".join(text_parts)
-            except Exception as pdf_err:
-                extracted_text = f"[PDF extraction error: {str(pdf_err)}]"
-        
-        # Handle image files (OCR with pytesseract)
-        elif content_type.startswith("image/") or any(filename.lower().endswith(ext) for ext in [".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff"]):
-            try:
-                import pytesseract
-                from PIL import Image
-                image = Image.open(io.BytesIO(content))
-                extracted_text = pytesseract.image_to_string(image)
-            except Exception as ocr_err:
-                extracted_text = f"[OCR error: {str(ocr_err)}]"
-        
-        # Handle text files
-        else:
-            extracted_text = content.decode("utf-8", errors="ignore")
-    
-    except Exception as e:
-        extracted_text = f"[Text extraction error: {str(e)}]"
-    
     # Limit text to 10000 characters for storage
-    extracted_text = extracted_text[:10000] if extracted_text else ""
+    extracted_text = extract_text_from_bytes(content, filename, content_type)
     
     doc_id = f"d-{uuid.uuid4().hex[:8]}"
     document = create_document({
@@ -1708,4 +1870,420 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
+
+# --- Routes: Intake Form ---
+
+@app.post("/intake/check")
+def check_patient_duplicate(req: IntakeCheckRequest):
+    """Check if patient exists."""
+    existing = find_patient_duplicate(email=req.email, phone=req.phone, name=req.name)
+    if existing:
+        return {"exists": True, "patient_id": existing["id"], "name": existing["name"]}
+    return {"exists": False}
+
+
+@app.post("/intake/verify-phone")
+def verify_phone_token(req: IntakeVerifyRequest):
+    """
+    Verify phone.email token by fetching the user JSON from the provided URL.
+    Returns the verified phone number and country code.
+    """
+    import urllib.request
+    import json
+    
+    try:
+        user_json_url = req.user_json_url
+        if not user_json_url:
+             raise HTTPException(status_code=400, detail="Missing user_json_url")
+
+        # Read JSON data from the URL
+        with urllib.request.urlopen(user_json_url) as url:
+            data = json.loads(url.read().decode())
+            
+        user_country_code = data.get("user_country_code")
+        user_phone_number = data.get("user_phone_number")
+        
+        # We can also get first/last name if needed, but we mostly care about the phone
+        # user_first_name = data.get("user_first_name")
+        # user_last_name = data.get("user_last_name")
+        
+        full_phone = f"{user_country_code}{user_phone_number}"
+        
+        # Check if this phone number exists in our DB
+        existing = find_patient_duplicate(phone=full_phone)
+        
+        return {
+            "success": True, 
+            "phone": full_phone, 
+            "country_code": user_country_code, 
+            "number": user_phone_number,
+            "existing_patient": existing
+        }
+        
+    except Exception as e:
+        logger.error(f"Phone verification failed: {e}")
+        raise HTTPException(status_code=400, detail="Verification failed")
+
+
+
+@app.post("/upload")
+async def upload_file_endpoint(file: UploadFile = File(...)):
+    """Upload file to storage."""
+    try:
+        content = await file.read()
+        # Sanitize filename
+        safe_filename = "".join(c for c in file.filename if c.isalnum() or c in "._-").strip()
+        if not safe_filename:
+            safe_filename = "unnamed_file"
+            
+        filename = f"{uuid.uuid4()}-{safe_filename}"
+        
+        # Determine content type
+        content_type = file.content_type or "application/octet-stream"
+        
+        public_url = upload_file(content, filename, content_type)
+        return {"url": public_url}
+    except Exception as e:
+        logger.error(f"Upload failed: {e}")
+        # Log stack trace for debugging
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/intake/submit")
+def submit_intake(req: IntakeSubmitRequest):
+    """Handle final intake submission."""
+    try:
+        patient_id = req.patient_id
+        
+        # 1. Create/Update Patient
+        if not patient_id:
+            # Calculate Age
+            try:
+                birth_date = datetime.strptime(req.dob, "%Y-%m-%d")
+                today = datetime.now()
+                age = today.year - birth_date.year - ((today.month, today.day) < (birth_date.month, birth_date.day))
+            except:
+                age = 0
+                
+            patient_data = {
+                "name": req.name,
+                "age": age,
+                "gender": req.gender,
+                "phone": req.phone,
+                "email": req.email,
+                "address": req.address,
+                "height_cm": req.height_cm,
+                "weight_kg": req.weight_kg,
+                "conditions": req.conditions,
+                "medications": req.medications,
+                "allergies": req.allergies,
+                # Store history in vitals or description? Schema doesn't have history column.
+                # We'll put it in a clinical dump or store it in vitals for reference?
+                # Actually, the user requirement mapped "history" to "Detailed Medical History".
+                # database schema doesn't have a history column.
+                # We will create a clinical dump for it or prepend to conditions?
+                # Let's create a Note or Clinical Dump.
+            }
+            patient = create_patient(patient_data)
+            patient_id = patient["id"]
+        
+        # 2. Create Appointment
+        # Next available slot? For MVP just schedule for "tomorrow 9am" or leave as requested.
+        # User prompt said "start_time (default to next available slot or null)"
+        # The schema says start_time is NOT NULL. So we must set it.
+        # Let's set it to tomorrow 9am for now.
+        tomorrow = datetime.now() + timedelta(days=1)
+        tomorrow_9am = tomorrow.replace(hour=9, minute=0, second=0, microsecond=0)
+        
+        appt_data = {
+            "patient_id": patient_id,
+            "start_time": tomorrow_9am.isoformat(),
+            "reason": req.reason,
+            "status": "scheduled"
+        }
+        appt = create_appointment(appt_data)
+        
+        # 3. Create Documents
+        for doc in req.documents:
+            create_document({
+                "patient_id": patient_id,
+                "title": doc.get("name", "Uploaded Document"),
+                "doc_type": "patient_upload",
+                "file_url": doc["url"],
+                "extracted_text": "" # Pending OCR
+            })
+            
+        # 4. Create Clinical Dump (Symptoms + History)
+        dump_text = f"Patient Reported Symptoms:\n{req.symptoms}\n\nPatient Reported History:\n{req.history}"
+        create_clinical_dump({
+            "id": f"dump-{uuid.uuid4()}",
+            "patient_id": patient_id,
+            "appointment_id": appt["id"],
+            "manual_notes": dump_text,
+            "combined_dump": dump_text
+        })
+        
+        return {"success": True, "patient_id": patient_id, "appointment_id": appt["id"]}
+        
+    except Exception as e:
+        logger.error(f"Intake submission failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/patients/search-simple")
+def simple_search_patients(q: str):
+    """Simple search for patients by name or phone."""
+    client = get_supabase()
+    query = client.table("patients").select("id, name, phone")
+    
+    # Supabase doesn't support complex OR in a single filter easily without RPC or postgrest syntax
+    # We'll fetch and filter in memory for 'simple' if q is short, or use .or_
+    res = client.table("patients").select("id, name, phone").or_(f"name.ilike.%{q}%,phone.ilike.%{q}%").execute()
+    
+    # De-duplicate by phone to avoid showing the same person multiple times
+    seen_phones = set()
+    unique_results = []
+    for p in res.data:
+        p_phone = p.get("phone")
+        if p_phone not in seen_phones:
+            unique_results.append({
+                "patient_id": p["id"],
+                "patient_name": p["name"],
+                "phone": p_phone
+            })
+            seen_phones.add(p_phone)
+    
+    return {"results": unique_results}
+
+
+# --- Routes: Intake Setup (Receptionist) & Public Intake ---
+
+@app.post("/setup-intake/create")
+def create_setup_intake(req: SetupIntakeRequest):
+    """
+    Receptionist creates an intake request (token).
+    1. Creates/Gets Patient.
+    2. Creates Appointment.
+    3. Creates Token.
+    """
+    # 1. Handle Patient
+    is_new = False
+    if req.patient_id:
+        patient = get_patient(req.patient_id)
+        if not patient:
+            raise HTTPException(status_code=404, detail="Patient not found")
+        pid = req.patient_id
+    else:
+        existing = find_patient_duplicate(phone=req.phone)
+        if existing:
+            pid = existing["id"]
+        else:
+            is_new = True
+            try:
+                p_data = {
+                    "id": f"p-{uuid.uuid4().hex[:8]}",
+                    "name": req.name,
+                    "phone": req.phone
+                }
+                new_p = create_patient(p_data)
+                pid = new_p["id"]
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Failed to create patient: {e}")
+
+    # 2. Check for Duplicate Appointment
+    try:
+        # Check if patient already has a scheduled appointment at this exact time
+        # This prevents accidental double-clicks from creating duplicate records
+        client = get_supabase()
+        existing_appt = client.table("appointments") \
+            .select("id") \
+            .eq("patient_id", pid) \
+            .eq("start_time", req.appointment_time) \
+            .execute()
+            
+        if existing_appt.data:
+            # We already have an appointment. Let's see if there's a token for it.
+            appt_id = existing_appt.data[0]["id"]
+            existing_token = client.table("intake_tokens") \
+                .select("token") \
+                .eq("appointment_id", appt_id) \
+                .execute()
+            
+            if existing_token.data:
+                base_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
+                link = f"{base_url}/intake/{existing_token.data[0]['token']}"
+                return {"success": True, "link": link, "token": existing_token.data[0]["token"], "reused": True}
+
+        # No duplicate found, proceed to create
+        appt_id = f"a-{uuid.uuid4().hex[:8]}"
+        appt_data = {
+            "id": appt_id,
+            "patient_id": pid,
+            "start_time": req.appointment_time,
+            "status": "scheduled",
+            "reason": "Intake Pending"
+        }
+        create_appointment(appt_data)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to handle appointment: {e}")
+
+    # 3. Create Token
+    try:
+        token_data = {
+            "token": str(uuid.uuid4()),
+            "patient_id": pid,
+            "appointment_id": appt_id,
+            "phone": req.phone,
+            "is_new_patient": is_new
+        }
+        create_intake_token(token_data)
+        
+        # Return link
+        base_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
+        link = f"{base_url}/intake/{token_data['token']}"
+        return {"success": True, "link": link, "token": token_data["token"]}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to create token: {e}")
+
+@app.get("/intake/token/{token}")
+def get_intake_token_details(token: str):
+    """Validate token and return context."""
+    data = get_intake_token(token)
+    if not data:
+        raise HTTPException(status_code=404, detail="Invalid token")
+    
+    # Check expiry (simple check)
+    expires = datetime.fromisoformat(data["expires_at"].replace("Z", "+00:00"))
+    if datetime.now(expires.tzinfo) > expires:
+         # Optionally allow if status is pending? no, strict expiry
+         raise HTTPException(status_code=400, detail="Token expired")
+         
+    if data["status"] != "pending":
+         raise HTTPException(status_code=400, detail="Token already used")
+
+    patient = data.get("patients")
+    
+    # Mask data? Or just return what is needed.
+    # We need name/phone for verification UI.
+    return {
+        "valid": True,
+        "phone_masked": data["phone"][-4:] if data["phone"] else "xxxx", 
+        "patient_name": patient["name"],
+        "appointment_time": data["appointments"]["start_time"],
+        "is_new_patient": data.get("is_new_patient", False),
+        "patient_details": {
+            "dob": patient.get("dob"), 
+            "gender": patient.get("gender"),
+            "has_history": bool(patient.get("conditions") or patient.get("medications"))
+        }
+    }
+
+@app.post("/intake/token/verify-phone")
+def verify_intake_token_phone(req: IntakeTokenVerifyRequest):
+    """Verify phone for token access."""
+    import urllib.request
+    
+    data = get_intake_token(req.token)
+    if not data:
+        raise HTTPException(status_code=404, detail="Invalid token")
+
+    try:
+        # Calls Phone Email API to get trusted phone number
+        with urllib.request.urlopen(req.user_json_url) as url:
+            user_data = json.loads(url.read().decode())
+
+        verified_phone = user_data.get("user_phone_number")
+        if not verified_phone:
+            raise HTTPException(status_code=400, detail="Could not verify phone number from provider")
+        
+        # Normalize phones (remove + or spaces)
+        # Assuming database phone is standardized? If not, do simple contains/endswith check
+        db_phone = data["phone"].replace("+","").replace(" ","")[-10:]
+        ver_phone = verified_phone.replace("+","").replace(" ","")[-10:]
+        
+        if db_phone != ver_phone:
+             raise HTTPException(status_code=403, detail="Phone number does not match record")
+             
+        return {"success": True}
+        
+    except Exception as e:
+        logger.error(f"Phone verification error: {e}")
+        raise HTTPException(status_code=500, detail="Phone verification failed")
+
+@app.post("/intake/token/submit")
+def submit_intake_token(req: IntakeTokenSubmitRequest):
+    """Submit the intake form via token."""
+    data = get_intake_token(req.token)
+    if not data or data["status"] != "pending":
+        raise HTTPException(status_code=400, detail="Invalid or used token")
+        
+    pid = data["patient_id"]
+    appt_id = data["appointment_id"]
+    
+    # Update Patient
+    p_updates = {}
+    if req.dob:
+        try:
+            dob_dt = datetime.strptime(req.dob, "%Y-%m-%d")
+            today = datetime.now()
+            age = today.year - dob_dt.year - ((today.month, today.day) < (dob_dt.month, dob_dt.day))
+            p_updates["age"] = age
+        except:
+            pass
+
+    if req.gender: p_updates["gender"] = req.gender
+    if req.address: p_updates["address"] = req.address
+    if req.height_cm: p_updates["height_cm"] = req.height_cm
+    if req.weight_kg: p_updates["weight_kg"] = req.weight_kg
+    if req.conditions: p_updates["conditions"] = req.conditions
+    if req.medications: p_updates["medications"] = req.medications
+    if req.allergies: p_updates["allergies"] = req.allergies
+    
+    if p_updates:
+        update_patient(pid, p_updates)
+        
+    # Update Appointment
+    update_appointment(appt_id, {
+        "reason": req.reason,
+        "status": "confirmed" # or similar
+    })
+    
+    # Save History/Symptoms as Note or Clinical Dump
+    note_content = f"Intake Form Submission:\n\nHistory: {req.history}\nSymptoms: {req.symptoms}\nReason: {req.reason}"
+    create_note({
+        "patient_id": pid,
+        "content": note_content,
+        "note_type": "intake"
+    })
+
+    # Also create clinical dump for AI processing
+    create_clinical_dump({
+            "id": f"dump-{uuid.uuid4()}",
+            "patient_id": pid,
+            "appointment_id": appt_id,
+            "manual_notes": note_content,
+            "combined_dump": note_content
+    })
+    
+    # Save Documents
+    for doc in req.documents:
+        file_url = doc.get("url")
+        extracted_text = ""
+        if file_url:
+            extracted_text = extract_text_from_url(file_url)
+            
+        create_document({
+             "patient_id": pid,
+             "title": doc.get("name", "Intake Document"),
+             "doc_type": "patient_upload",
+             "file_url": file_url,
+             "extracted_text": extracted_text
+        })
+        
+    # Mark token used
+    update_intake_token(req.token, {"status": "completed"})
+    
+    return {"success": True}
 

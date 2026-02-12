@@ -76,14 +76,14 @@ Generate the summary NOW using the exact format above. Be concise and clinical."
 
 SUMMARY_CHIEF_COMPLAINT_PROMPT = """You are an expert medical scribe.
 Based on the patient's appointment reason and records, identify the **Chief Complaint**.
-Output ONLY the chief complaint in 1-2 concise sentences. Do not add labels or extra text.
+Output ONLY the chief complaint as a brief medical phrase (max 5 words). Do not add labels or extra text.
 
 Patient Reason: {reason}
 Patient Context: {patient_context}"""
 
 SUMMARY_ONSET_PROMPT = """You are an expert medical scribe.
 Determine the **Onset** of the patient's current complaint.
-Output ONLY the duration (e.g., "3 days ago", "Ongoing for 2 weeks", "Acute onset this morning", "Since consultation").
+Output ONLY the duration (e.g., "3 days ago", "Twice daily", "Since yesterday"). Max 5 words.
 If not mentioned/applicable, output "As per consultation".
 
 Chief Complaint: {chief_complaint}
@@ -91,16 +91,28 @@ Patient Context: {patient_context}"""
 
 SUMMARY_SEVERITY_PROMPT = """You are an expert medical scribe.
 Assess the **Severity** of the patient's condition.
-Output ONLY a short severity rating and brief justification (e.g., "Moderate - pain 6/10", "Mild - unlikely to be urgent", "Severe - requires immediate attention").
-Keep it under 10 words.
+Output ONLY a short severity rating (e.g., "Moderate", "Severe", "Critical", "Mild"). Max 5 words. Do not explain.
 
 Chief Complaint: {chief_complaint}
 Patient Context: {patient_context}"""
 
 SUMMARY_FINDINGS_PROMPT = """You are an expert medical scribe.
 Extract **Key Findings** and abnormalities from the patient's context and history that are relevant to the current visit.
-Output a JSON list of strings. Example: ["BP elevated at 140/90", "Reports photosensitivity", "No known allergies"].
+Output a JSON list of strings. Example: ["BP 140/90", "Photosensitive", "⚠ HbA1c 8.2%"].
 Flag abnormal values with ⚠.
+Each finding must be extremely brief (max 5 words).
+
+IMPORTANT: Do NOT include any of the following as separate findings — they are already displayed elsewhere on the patient card:
+- Chronic conditions / known diagnoses (e.g., "Has Type 2 Diabetes", "History of hypertension")
+- Known allergies (e.g., "Allergic to penicillin", "No known allergies")
+- Current medications (e.g., "Currently taking Metformin", "On Lisinopril 10mg")
+
+Instead focus on:
+- Abnormal vital signs or lab values
+- New or acute symptoms reported during this visit
+- Relevant physical exam findings
+- Changes from baseline or recent trends
+- Risk factors pertinent to the chief complaint
 
 Chief Complaint: {chief_complaint}
 Patient Context: {patient_context}
@@ -108,8 +120,18 @@ Patient Context: {patient_context}
 Output ONLY the JSON list."""
 
 SUMMARY_CONTEXT_PROMPT = """You are an expert medical scribe.
-Provide a brief **Medical Context** summary (2-3 sentences) relevant to this visit (history, risk factors, recent changes).
-Do not repeat the chief complaint.
+Write a brief **Medical Context** paragraph (2-4 sentences) that synthesizes the clinically relevant background for this visit.
+
+You MUST include (if available in the patient context):
+1. Relevant presenting symptoms from transcripts or clinical dumps (location, quality, radiation, aggravating/relieving factors, associated symptoms like nausea, vomiting, fever).
+2. Pertinent past medical history (conditions).
+3. Current medications and known drug allergies (name the allergen and reaction).
+4. Risk factors relevant to the current presentation.
+
+IMPORTANT RULES:
+- ONLY state facts that are explicitly present in the Patient Context below. Do NOT invent or assume information.
+- If a piece of data is not available, do NOT mention it at all — never say "denies" or "reports no" unless the patient explicitly said so in a transcript.
+- You may briefly reference the chief complaint to connect symptoms to context, but do not just restate it.
 
 Chief Complaint: {chief_complaint}
 Patient Context: {patient_context}"""
@@ -270,3 +292,30 @@ Output a SINGLE concise sentence (max 15 words) explaining the relevance.
 Example: "Has a history of hypertension and recent high BP."
 Do not include the patient name in the output.
 """
+
+
+CHAT_SUGGESTIONS_PROMPT = """You are a clinical AI assistant for Parchi.ai. Generate exactly 3 short, specific questions that a doctor would likely want to ask about this patient RIGHT NOW during their appointment.
+
+## Patient Info:
+- Name: {patient_name}
+- Age: {patient_age}, Gender: {patient_gender}
+- Conditions: {conditions}
+- Medications: {medications}
+- Allergies: {allergies}
+- Vitals: BP {bp}, SpO2 {spo2}%, HR {hr} bpm, Temp {temp}°F
+- Chief Complaint: {chief_complaint}
+- Key Findings: {findings}
+
+## Rules:
+1. Make questions SPECIFIC to this patient's data — never generic.
+2. Each question should be 4-8 words, phrased naturally.
+3. Focus on: drug interactions, symptom clarification, treatment options, lab interpretation, or risk assessment.
+4. If the patient has allergies, one question should relate to safe prescribing.
+5. If vitals are abnormal, one question should address that.
+
+Output exactly 3 lines, one question per line. Do not use numbering or bullets.
+Example:
+Any interaction between Metformin and Lisinopril?
+Is BP 150/95 concerning given diabetes?
+Safe antibiotics with penicillin allergy?"""
+

@@ -62,10 +62,6 @@ from database import (
     get_clinical_dumps_for_patient,
     get_clinical_dump,
     verify_login,
-    create_telegram_session,
-    update_telegram_session,
-    update_telegram_session,
-    get_active_telegram_session,
     find_patient_duplicate,
     create_intake_token,
     get_intake_token,
@@ -91,7 +87,6 @@ from prompts import (
 )
 from gemini_live import GeminiLive, TOOL_DECLARATIONS, TOOL_MAPPING
 from consult_transcription import ConsultTranscriber
-from slot_availability import get_available_slots, get_available_dates
 from ocr_utils import extract_text_from_url, extract_text_from_bytes
 
 load_dotenv(override=True)
@@ -107,23 +102,12 @@ GEMINI_LIVE_MODEL = os.getenv("GEMINI_LIVE_MODEL", "gemini-2.5-flash-native-audi
 # Configure logging
 logger = logging.getLogger(__name__)
 
-# Telegram bot configuration
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_WEBHOOK_URL = os.getenv("TELEGRAM_WEBHOOK_URL", "")
-TELEGRAM_MODE = os.getenv("TELEGRAM_MODE", "polling")  # "polling" or "webhook"
-
-_telegram_bot = None
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup / shutdown lifecycle for the FastAPI app."""
-    global _telegram_bot
-
     # -- Startup --
     logger.info("Starting backend with PORT=%s", os.environ.get("PORT", "8000"))
-    logger.info("Telegram configuration: MODE=%s, HAS_TOKEN=%s, WEBHOOK_URL_SET=%s", 
-                TELEGRAM_MODE, bool(TELEGRAM_BOT_TOKEN), bool(TELEGRAM_WEBHOOK_URL))
 
     # Ensure Supabase Storage bucket exists
     try:
@@ -132,29 +116,9 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("Could not ensure storage bucket: %s", e)
 
-    # Initialize Telegram bot
-    if TELEGRAM_BOT_TOKEN:
-        try:
-            from telegram_bot import TelegramIntakeBot
-            _telegram_bot = TelegramIntakeBot(TELEGRAM_BOT_TOKEN)
-            if TELEGRAM_MODE == "webhook" and TELEGRAM_WEBHOOK_URL:
-                await _telegram_bot.setup_webhook(TELEGRAM_WEBHOOK_URL)
-                logger.info("Telegram bot started in webhook mode")
-            else:
-                await _telegram_bot.start_polling()
-                logger.info("Telegram bot started in polling mode")
-        except Exception as e:
-            logger.error("Failed to start Telegram bot: %s", e)
-            _telegram_bot = None
-    else:
-        logger.info("TELEGRAM_BOT_TOKEN not set — Telegram bot disabled")
-
     yield
 
     # -- Shutdown --
-    if _telegram_bot:
-        await _telegram_bot.stop()
-        logger.info("Telegram bot stopped")
 
 
 app = FastAPI(title="Parchi.ai API", version="1.0.0", lifespan=lifespan)
@@ -1835,35 +1799,6 @@ async def upload_document(
     })
     return {"document": document, "extracted_text_length": len(extracted_text)}
 
-
-
-# --- Routes: Telegram Webhook ---
-
-
-@app.post("/webhook/telegram")
-async def telegram_webhook(request: Request):
-    """Receive Telegram updates via webhook."""
-    if not _telegram_bot:
-        raise HTTPException(status_code=503, detail="Telegram bot not initialized")
-    update_data = await request.json()
-    await _telegram_bot.process_update(update_data)
-    return {"ok": True}
-
-
-# --- Routes: Slot Availability ---
-
-
-@app.get("/slots/available")
-def list_available_slots(date: str | None = None):
-    """Get available appointment slots.
-    If date is provided (YYYY-MM-DD), returns slots for that date.
-    Otherwise returns available dates.
-    """
-    if date:
-        slots = get_available_slots(date)
-        return {"date": date, "slots": slots}
-    dates = get_available_dates()
-    return {"dates": dates}
 
 
 if __name__ == "__main__":

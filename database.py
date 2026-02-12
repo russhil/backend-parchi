@@ -605,45 +605,6 @@ def get_clinical_dump(dump_id: str) -> Optional[dict]:
 
 # --- Auth Operations ---
 
-# --- Telegram Intake Session Operations ---
-
-def create_telegram_session(data: dict) -> dict:
-    """Create a new telegram intake session."""
-    client = get_supabase()
-    result = client.table("telegram_intake_sessions").insert(data).execute()
-    return result.data[0] if result.data else {}
-
-
-def update_telegram_session(session_id: str, updates: dict) -> dict:
-    """Update a telegram intake session."""
-    client = get_supabase()
-    updates["updated_at"] = datetime.now().isoformat()
-    result = (
-        client.table("telegram_intake_sessions")
-        .update(updates)
-        .eq("id", session_id)
-        .execute()
-    )
-    return result.data[0] if result.data else {}
-
-
-def get_active_telegram_session(chat_id: int) -> Optional[dict]:
-    """Get the in-progress telegram intake session for a chat ID."""
-    client = get_supabase()
-    result = (
-        client.table("telegram_intake_sessions")
-        .select("*")
-        .eq("telegram_chat_id", chat_id)
-        .eq("status", "in_progress")
-        .order("created_at", desc=True)
-        .limit(1)
-        .execute()
-    )
-    return result.data[0] if result.data else None
-
-
-# --- Auth Operations ---
-
 def verify_login(username: str, password_plain: str) -> bool:
     """
     Verify login credentials.

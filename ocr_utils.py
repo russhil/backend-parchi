@@ -1,12 +1,29 @@
 import io
+import base64
 import requests
 import os
 import logging
 from PIL import Image
-import pytesseract
 import pdfplumber
 
+from google import genai
+from google.genai import types
+
 logger = logging.getLogger(__name__)
+
+# Lazy-initialized Gemini client for OCR
+_ocr_client = None
+
+def _get_ocr_client():
+    """Get or create a Gemini client for OCR."""
+    global _ocr_client
+    if _ocr_client is None:
+        api_key = os.getenv("GOOGLE_API_KEY", "")
+        if not api_key:
+            raise RuntimeError("GOOGLE_API_KEY not set — cannot perform OCR")
+        _ocr_client = genai.Client(api_key=api_key)
+    return _ocr_client
+
 
 def extract_text_from_url(url: str) -> str:
     """Download file from URL and extract text."""
@@ -41,17 +58,45 @@ def extract_text_from_bytes(content: bytes, filename: str = "", content_type: st
                 logger.warning(f"PDF extraction failed: {pdf_err}")
                 return f"[PDF extraction error: {str(pdf_err)}]"
         
-        # 2. Handle Image
-        is_image = content_type.startswith("image/") or any(
+        # 2. Handle Image — use Gemini Vision instead of Tesseract
+        is_image = content_type.startswith("image/") if content_type else any(
             filename.lower().endswith(ext) for ext in [".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff"]
         )
         if is_image:
             try:
-                image = Image.open(io.BytesIO(content))
-                text = pytesseract.image_to_string(image)
-                return text[:10000]
+                # Determine the MIME type
+                mime_type = content_type if content_type else "image/png"
+                if not mime_type.startswith("image/"):
+                    mime_type = "image/png"
+
+                client = _get_ocr_client()
+                response = client.models.generate_content(
+                    model="gemini-2.0-flash",
+                    contents=[
+                        types.Content(
+                            parts=[
+                                types.Part.from_bytes(
+                                    data=content,
+                                    mime_type=mime_type,
+                                ),
+                                types.Part.from_text(
+                                    text="Extract ALL text from this image exactly as written. "
+                                    "Preserve the original formatting, layout, and structure as much as possible. "
+                                    "If there are tables, preserve them. If there are headers, preserve them. "
+                                    "Return ONLY the extracted text, nothing else."
+                                ),
+                            ]
+                        )
+                    ],
+                    config=types.GenerateContentConfig(
+                        temperature=0.1,
+                        max_output_tokens=4000,
+                    ),
+                )
+                extracted = response.text.strip() if response.text else ""
+                return extracted[:10000] if extracted else "[No text found in image]"
             except Exception as ocr_err:
-                logger.warning(f"OCR failed: {ocr_err}")
+                logger.warning(f"Gemini Vision OCR failed: {ocr_err}")
                 return f"[OCR error: {str(ocr_err)}]"
         
         # 3. Fallback to generic text

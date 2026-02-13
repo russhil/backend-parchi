@@ -75,11 +75,13 @@ def extract_text_from_bytes(content: bytes, filename: str = "", content_type: st
                     contents=[
                         types.Content(
                             parts=[
-                                types.Part.from_bytes(
-                                    data=content,
-                                    mime_type=mime_type,
+                                types.Part(
+                                    inline_data=types.Blob(
+                                        data=content,
+                                        mime_type=mime_type,
+                                    )
                                 ),
-                                types.Part.from_text(
+                                types.Part(
                                     text="Extract ALL text from this image exactly as written. "
                                     "Preserve the original formatting, layout, and structure as much as possible. "
                                     "If there are tables, preserve them. If there are headers, preserve them. "

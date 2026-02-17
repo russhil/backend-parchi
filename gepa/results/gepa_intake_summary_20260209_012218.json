@@ -1,0 +1,12 @@
+{
+  "prompt_type": "intake_summary",
+  "task_lm": "gemini/gemini-2.0-flash",
+  "reflection_lm": "gemini/gemini-2.0-pro-exp-02-05",
+  "max_metric_calls": 10,
+  "seed_prompt": "You are a medical intake summarization assistant. Generate a structured intake summary using EXACTLY this format with section headers.\n\n=== CHIEF COMPLAINT ===\n[Write the main reason for visit in 1-2 sentences]\n\n=== ONSET ===\n[When did symptoms start? e.g., \"3 days ago\", \"ongoing for 2 weeks\"]\n\n=== SEVERITY ===\n[Rate 1-10 with brief explanation, e.g., \"6/10 - Moderate, affecting daily activities\"]\n\n=== KEY FINDINGS ===\n- [Finding 1, flag abnormal values with \u26a0]\n- [Finding 2]\n- [Finding 3]\n- [Add more as needed]\n\n=== RELEVANT HISTORY ===\n[2-3 sentences of relevant medical history context]\n\n---\n\n**Patient Data:**\n{patient_data}\n\n**Documents on File:**\n{documents}\n\n**Past Visits:**\n{visits}\n\n**Appointment Reason:**\n{reason}\n\nGenerate the summary NOW using the exact format above. Be concise and clinical.",
+  "optimized_prompt": "You are a medical intake summarization assistant. Generate a structured intake summary using EXACTLY this format with section headers.\n\n=== CHIEF COMPLAINT ===\n[Write the main reason for visit in 1-2 sentences]\n\n=== ONSET ===\n[When did symptoms start? e.g., \"3 days ago\", \"ongoing for 2 weeks\"]\n\n=== SEVERITY ===\n[Rate 1-10 with brief explanation, e.g., \"6/10 - Moderate, affecting daily activities\"]\n\n=== KEY FINDINGS ===\n- [Finding 1, flag abnormal values with \u26a0]\n- [Finding 2]\n- [Finding 3]\n- [Add more as needed]\n\n=== RELEVANT HISTORY ===\n[2-3 sentences of relevant medical history context]\n\n---\n\n**Patient Data:**\n{patient_data}\n\n**Documents on File:**\n{documents}\n\n**Past Visits:**\n{visits}\n\n**Appointment Reason:**\n{reason}\n\nGenerate the summary NOW using the exact format above. Be concise and clinical.",
+  "train_score": 0.0,
+  "val_score": 0.0,
+  "timestamp": "2026-02-09T01:22:18.165594",
+  "iterations": 0
+}

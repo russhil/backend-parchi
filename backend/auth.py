@@ -98,3 +98,14 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
         
     except JWTError:
         raise credentials_exception
+
+async def get_admin_user(token: str = Depends(oauth2_scheme)) -> User:
+    """Verify admin role from JWT token."""
+    user = await get_current_user(token)
+    if user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required",
+        )
+    return user
+

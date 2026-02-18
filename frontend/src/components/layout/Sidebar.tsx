@@ -13,13 +13,34 @@ const navItems = [
   { icon: "settings", label: "Settings", href: "/settings" },
 ];
 
+function getInitials(name: string): string {
+  return name
+    .split(" ")
+    .map((n) => n[0])
+    .join("")
+    .toUpperCase()
+    .slice(0, 2);
+}
+
 export default function Sidebar() {
   const pathname = usePathname();
   const router = useRouter();
   const [darkMode, setDarkMode] = useState(false);
+  const [initials, setInitials] = useState("Dr");
 
   useEffect(() => {
     setDarkMode(document.documentElement.classList.contains("dark"));
+    const stored = localStorage.getItem("user_info");
+    if (stored) {
+      try {
+        const userInfo = JSON.parse(stored);
+        if (userInfo.doctor_name) {
+          setInitials(getInitials(userInfo.doctor_name));
+        }
+      } catch (e) {
+        console.error("Failed to parse user info", e);
+      }
+    }
   }, []);
 
   const toggleDarkMode = () => {
@@ -95,7 +116,7 @@ export default function Sidebar() {
           </button>
 
           <div className="w-9 h-9 rounded-full bg-primary/10 flex items-center justify-center text-primary font-semibold text-sm mb-2">
-            YC
+            {initials}
           </div>
         </div>
       </aside>

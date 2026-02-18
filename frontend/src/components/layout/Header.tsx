@@ -1,15 +1,27 @@
 "use client";
 
 import { useRouter, usePathname } from "next/navigation";
-import { useState, useEffect } from "react";
-import Image from "next/image";
+import { useState, useEffect, useMemo } from "react";
 import { search } from "@/lib/api";
+
+function getInitials(name: string): string {
+  return name
+    .split(" ")
+    .map((n) => n[0])
+    .join("")
+    .toUpperCase()
+    .slice(0, 2);
+}
 
 export default function Header() {
   const router = useRouter();
   const pathname = usePathname();
   const [query, setQuery] = useState("");
-  const [userInfo, setUserInfo] = useState<{ doctor_name: string; clinic_name: string } | null>(null);
+  const [userInfo, setUserInfo] = useState<{
+    doctor_name: string;
+    clinic_name: string;
+    specialization?: string;
+  } | null>(null);
 
   useEffect(() => {
     const stored = localStorage.getItem("user_info");
@@ -22,8 +34,21 @@ export default function Header() {
     }
   }, []);
 
+  const initials = useMemo(
+    () => (userInfo?.doctor_name ? getInitials(userInfo.doctor_name) : "Dr"),
+    [userInfo?.doctor_name]
+  );
+
   // Hide header on public pages
-  if (pathname === '/login' || pathname === '/landing' || pathname === '/landing2' || pathname === '/privacy-policy' || pathname === '/terms-of-service' || pathname.startsWith('/intake/')) return null;
+  if (
+    pathname === "/login" ||
+    pathname === "/landing" ||
+    pathname === "/landing2" ||
+    pathname === "/privacy-policy" ||
+    pathname === "/terms-of-service" ||
+    pathname.startsWith("/intake/")
+  )
+    return null;
 
   const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -31,10 +56,11 @@ export default function Header() {
     try {
       const data = await search(query);
       if (data.results.length > 0) {
-        router.push(`/patient/${data.results[0].patient_id}?search=${encodeURIComponent(query)}`);
+        router.push(
+          `/patient/${data.results[0].patient_id}?search=${encodeURIComponent(query)}`
+        );
       }
     } catch {
-      // In demo mode, navigate to demo patient
       router.push(`/patient/p1?search=${encodeURIComponent(query)}`);
     }
   };
@@ -67,19 +93,17 @@ export default function Header() {
         </div>
       </form>
 
-      <div className="flex items-center gap-3 md:gap-4">
-        <button className="relative text-text-secondary hover:text-text-primary transition">
-          <span className="material-symbols-outlined text-[22px] md:text-[24px]">notifications</span>
-          <span className="absolute -top-1 -right-1 w-2 h-2 bg-danger rounded-full" />
-        </button>
-        <div className="flex items-center gap-2">
-          <div className="w-8 h-8 rounded-full bg-primary flex items-center justify-center text-white text-xs font-semibold">
-            YC
-          </div>
-          <div className="hidden lg:block">
-            <p className="text-sm font-semibold leading-tight">YC</p>
-            <p className="text-xs text-text-secondary leading-tight">General Physician</p>
-          </div>
+      <div className="flex items-center gap-2">
+        <div className="w-8 h-8 rounded-full bg-primary flex items-center justify-center text-white text-xs font-semibold">
+          {initials}
+        </div>
+        <div className="hidden lg:block">
+          <p className="text-sm font-semibold leading-tight">
+            {userInfo?.doctor_name || "Doctor"}
+          </p>
+          <p className="text-xs text-text-secondary leading-tight">
+            {userInfo?.specialization || userInfo?.clinic_name || ""}
+          </p>
         </div>
       </div>
     </header>

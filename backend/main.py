@@ -74,6 +74,18 @@ from database import (
     delete_appointment_retain,
     delete_appointment_purge,
     get_doctor,
+    get_clinic,
+    get_all_clinics,
+    create_clinic,
+    update_clinic,
+    delete_clinic,
+    get_doctors_for_clinic,
+    create_doctor,
+    update_doctor,
+    delete_doctor,
+    create_user,
+    get_users_for_clinic,
+    delete_user,
 )
 from supabase_storage import upload_file
 from prompts import (
@@ -115,6 +127,9 @@ SELF_PING_URL = os.getenv(
     "SELF_PING_URL", "https://backend-parchi.onrender.com/health"
 )
 SELF_PING_INTERVAL = int(os.getenv("SELF_PING_INTERVAL", "300"))  # seconds (default 5 min)
+
+# Admin password (env-based)
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "parchi-admin-2024")
 
 
 async def _keep_alive_ping():
@@ -325,6 +340,29 @@ class IntakeTokenVerifyRequest(BaseModel):
 
 
 
+class AdminLoginRequest(BaseModel):
+    password: str
+
+class AdminClinicRequest(BaseModel):
+    name: str
+    slug: str
+    phone: str | None = None
+    email: str | None = None
+    address: str | None = None
+
+class AdminDoctorRequest(BaseModel):
+    clinic_id: str
+    name: str
+    specialization: str | None = None
+    role: str = "doctor"
+
+class AdminUserRequest(BaseModel):
+    username: str
+    password: str
+    clinic_id: str
+    doctor_id: str | None = None
+
+
 class IntakeTokenSubmitRequest(BaseModel):
     token: str
     
@@ -436,6 +474,7 @@ def login(req: LoginRequest):
             "clinic_name": user_info["clinic_name"],
             "doctor_id": user_info["doctor_id"],
             "doctor_name": user_info["doctor_name"],
+            "specialization": user_info.get("specialization"),
             "role": user_info["role"],
         }
     except Exception as e:
@@ -449,12 +488,17 @@ def login(req: LoginRequest):
 
 @app.get("/me")
 def get_current_user_info(user: User = Depends(auth.get_current_user)):
-    """Return current logged-in user info."""
+    """Return current logged-in user info with doctor and clinic details."""
+    doctor = get_doctor(user.doctor_id) if user.doctor_id else None
+    clinic = get_clinic(user.clinic_id) if user.clinic_id else None
     return {
         "user_id": user.id,
         "username": user.username,
         "clinic_id": user.clinic_id,
+        "clinic_name": clinic.get("name") if clinic else None,
         "doctor_id": user.doctor_id,
+        "doctor_name": doctor.get("name") if doctor else None,
+        "specialization": doctor.get("specialization") if doctor else None,
         "role": user.role,
     }
 
@@ -483,6 +527,142 @@ def gemini_live_health():
         "project_id": GCP_PROJECT_ID if auth_mode == "vertex_ai" else None,
         "issues": issues or None,
     }
+
+
+# --- Routes: Admin Panel ---
+
+
+@app.post("/admin/login")
+def admin_login(req: AdminLoginRequest):
+    """Admin login — validates admin password, returns JWT with admin role."""
+    if req.password != ADMIN_PASSWORD:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid admin password",
+        )
+    access_token = auth.create_access_token(
+        data={
+            "sub": "admin",
+            "user_id": "admin",
+            "clinic_id": "admin",
+            "doctor_id": "admin",
+            "role": "admin",
+        },
+        expires_delta=timedelta(hours=12),
+    )
+    return {"access_token": access_token, "token_type": "bearer"}
+
+
+@app.get("/admin/clinics")
+def admin_list_clinics(admin: auth.User = Depends(auth.get_admin_user)):
+    """List all clinics with counts."""
+    clinics = get_all_clinics()
+    return {"clinics": clinics}
+
+
+@app.post("/admin/clinics")
+def admin_create_clinic(req: AdminClinicRequest, admin: auth.User = Depends(auth.get_admin_user)):
+    """Create a new clinic."""
+    data = {"name": req.name, "slug": req.slug}
+    if req.phone:
+        data["phone"] = req.phone
+    if req.email:
+        data["email"] = req.email
+    if req.address:
+        data["address"] = req.address
+    clinic = create_clinic(data)
+    return {"clinic": clinic}
+
+
+@app.put("/admin/clinics/{clinic_id}")
+def admin_update_clinic(clinic_id: str, req: AdminClinicRequest, admin: auth.User = Depends(auth.get_admin_user)):
+    """Update a clinic."""
+    updates = {"name": req.name, "slug": req.slug}
+    if req.phone is not None:
+        updates["phone"] = req.phone
+    if req.email is not None:
+        updates["email"] = req.email
+    if req.address is not None:
+        updates["address"] = req.address
+    clinic = update_clinic(clinic_id, updates)
+    if not clinic:
+        raise HTTPException(status_code=404, detail="Clinic not found")
+    return {"clinic": clinic}
+
+
+@app.delete("/admin/clinics/{clinic_id}")
+def admin_delete_clinic(clinic_id: str, admin: auth.User = Depends(auth.get_admin_user)):
+    """Delete a clinic."""
+    success = delete_clinic(clinic_id)
+    return {"success": success}
+
+
+@app.get("/admin/clinics/{clinic_id}/doctors")
+def admin_list_doctors(clinic_id: str, admin: auth.User = Depends(auth.get_admin_user)):
+    """List all doctors for a clinic."""
+    doctors = get_doctors_for_clinic(clinic_id)
+    return {"doctors": doctors}
+
+
+@app.get("/admin/clinics/{clinic_id}/users")
+def admin_list_users(clinic_id: str, admin: auth.User = Depends(auth.get_admin_user)):
+    """List all users for a clinic."""
+    users = get_users_for_clinic(clinic_id)
+    return {"users": users}
+
+
+@app.post("/admin/doctors")
+def admin_create_doctor(req: AdminDoctorRequest, admin: auth.User = Depends(auth.get_admin_user)):
+    """Create a new doctor."""
+    data = {
+        "clinic_id": req.clinic_id,
+        "name": req.name,
+        "role": req.role,
+    }
+    if req.specialization:
+        data["specialization"] = req.specialization
+    doctor = create_doctor(data)
+    return {"doctor": doctor}
+
+
+@app.put("/admin/doctors/{doctor_id}")
+def admin_update_doctor(doctor_id: str, req: AdminDoctorRequest, admin: auth.User = Depends(auth.get_admin_user)):
+    """Update a doctor."""
+    updates = {"name": req.name, "role": req.role}
+    if req.specialization is not None:
+        updates["specialization"] = req.specialization
+    doctor = update_doctor(doctor_id, updates)
+    if not doctor:
+        raise HTTPException(status_code=404, detail="Doctor not found")
+    return {"doctor": doctor}
+
+
+@app.delete("/admin/doctors/{doctor_id}")
+def admin_delete_doctor(doctor_id: str, admin: auth.User = Depends(auth.get_admin_user)):
+    """Delete a doctor."""
+    success = delete_doctor(doctor_id)
+    return {"success": success}
+
+
+@app.post("/admin/users")
+def admin_create_user(req: AdminUserRequest, admin: auth.User = Depends(auth.get_admin_user)):
+    """Create login credentials for a doctor."""
+    data = {
+        "username": req.username,
+        "password": req.password,
+        "clinic_id": req.clinic_id,
+    }
+    if req.doctor_id:
+        data["doctor_id"] = req.doctor_id
+    user = create_user(data)
+    return {"user": user}
+
+
+@app.delete("/admin/users/{user_id}")
+def admin_delete_user(user_id: str, admin: auth.User = Depends(auth.get_admin_user)):
+    """Delete a user."""
+    success = delete_user(user_id)
+    return {"success": success}
 
 
 # --- Routes: Gemini Live Voice Chat ---
@@ -2121,12 +2301,18 @@ def process_parchi(req: ParchiProcessRequest, x_clinic_id: str = Header(None), x
     results = []
     base_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
 
-    # Fetch doctor name for WhatsApp
+    # Fetch doctor name for WhatsApp (strip Dr./Doctor prefix since template adds it)
     doctor_name = "Doctor"
     if x_doctor_id:
         doc = get_doctor(x_doctor_id)
         if doc and doc.get("name"):
-            doctor_name = doc["name"]
+            name = doc["name"].strip()
+            # Remove leading "Dr.", "Dr ", "Doctor " since the WhatsApp template already prepends "Dr."
+            for prefix in ("Dr.", "Dr ", "Doctor "):
+                if name.startswith(prefix):
+                    name = name[len(prefix):].strip()
+                    break
+            doctor_name = name if name else "Doctor"
 
     for entry in req.entries:
         entry_result = {

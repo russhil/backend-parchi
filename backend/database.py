@@ -56,6 +56,17 @@ def get_doctor(doctor_id: str) -> Optional[dict]:
         return None
 
 
+def get_clinic(clinic_id: str) -> Optional[dict]:
+    """Fetch a single clinic by ID."""
+    try:
+        client = get_supabase()
+        result = client.table("clinics").select("*").eq("id", clinic_id).execute()
+        return result.data[0] if result.data else None
+    except Exception as e:
+        print(f"Error fetching clinic: {str(e)}")
+        return None
+
+
 def get_all_patients(clinic_id: str, doctor_id: str = None) -> list[dict]:
     """Fetch all patients for a specific clinic, optionally scoped to a doctor."""
     client = get_supabase()
@@ -815,21 +826,21 @@ def verify_login(username: str, password_plain: str, clinic_slug: str) -> dict |
     doctor_name = "Doctor"
     role = user.get("role", "doctor")
     
+    specialization = None
     if doctor_id:
-        doctor_result = client.table("doctors").select("name, role").eq("id", doctor_id).execute()
+        doctor_result = client.table("doctors").select("name, role, specialization").eq("id", doctor_id).execute()
         if doctor_result.data:
             doctor_name = doctor_result.data[0]["name"]
-            # role from doctor table overrides user role if present, or we sync them. 
-            # For now let's use user role or doctor role.
-            # role = doctor_result.data[0].get("role", role)
+            specialization = doctor_result.data[0].get("specialization")
     
     return {
         "user_id": user["id"],
-        "username": username, # Added missing field
+        "username": username,
         "clinic_id": target_clinic_id,
         "clinic_name": clinic_name,
         "doctor_id": doctor_id or "dr-default",
         "doctor_name": doctor_name,
+        "specialization": specialization,
         "role": role,
     }
 
@@ -868,4 +879,108 @@ def update_intake_token(token: str, updates: dict) -> dict:
         .execute()
     )
     return result.data[0] if result.data else {}
+
+
+# --- Admin Operations ---
+
+def get_all_clinics() -> list[dict]:
+    """Fetch all clinics with doctor count."""
+    client = get_supabase()
+    result = client.table("clinics").select("*").order("created_at", desc=True).execute()
+    clinics = result.data or []
+    for clinic in clinics:
+        doc_count = client.table("doctors").select("id", count="exact").eq("clinic_id", clinic["id"]).execute()
+        clinic["doctor_count"] = doc_count.count if doc_count.count is not None else 0
+        user_count = client.table("users").select("id", count="exact").eq("clinic_id", clinic["id"]).execute()
+        clinic["user_count"] = user_count.count if user_count.count is not None else 0
+    return clinics
+
+
+def create_clinic(data: dict) -> dict:
+    """Create a new clinic."""
+    client = get_supabase()
+    result = client.table("clinics").insert(data).execute()
+    return result.data[0] if result.data else {}
+
+
+def update_clinic(clinic_id: str, updates: dict) -> dict:
+    """Update a clinic by ID."""
+    client = get_supabase()
+    result = client.table("clinics").update(updates).eq("id", clinic_id).execute()
+    return result.data[0] if result.data else {}
+
+
+def delete_clinic(clinic_id: str) -> bool:
+    """Delete a clinic by ID (CASCADE handles children)."""
+    client = get_supabase()
+    result = client.table("clinics").delete().eq("id", clinic_id).execute()
+    return bool(result.data)
+
+
+def get_doctors_for_clinic(clinic_id: str) -> list[dict]:
+    """Fetch all doctors for a clinic."""
+    client = get_supabase()
+    result = client.table("doctors").select("*").eq("clinic_id", clinic_id).order("name").execute()
+    return result.data or []
+
+
+def create_doctor(data: dict) -> dict:
+    """Create a new doctor linked to a clinic."""
+    client = get_supabase()
+    result = client.table("doctors").insert(data).execute()
+    return result.data[0] if result.data else {}
+
+
+def update_doctor(doctor_id: str, updates: dict) -> dict:
+    """Update a doctor by ID."""
+    client = get_supabase()
+    result = client.table("doctors").update(updates).eq("id", doctor_id).execute()
+    return result.data[0] if result.data else {}
+
+
+def delete_doctor(doctor_id: str) -> bool:
+    """Delete a doctor by ID."""
+    client = get_supabase()
+    result = client.table("doctors").delete().eq("id", doctor_id).execute()
+    return bool(result.data)
+
+
+def create_user(data: dict) -> dict:
+    """Create a new user with hashed password."""
+    from auth import get_password_hash
+    client = get_supabase()
+    if "password" in data:
+        data["password_hash"] = get_password_hash(data.pop("password"))
+    result = client.table("users").insert(data).execute()
+    row = result.data[0] if result.data else {}
+    row.pop("password_hash", None)
+    return row
+
+
+def get_users_for_clinic(clinic_id: str) -> list[dict]:
+    """Fetch all users for a clinic (no password hashes)."""
+    client = get_supabase()
+    result = (
+        client.table("users")
+        .select("id, username, clinic_id, doctor_id, created_at")
+        .eq("clinic_id", clinic_id)
+        .order("username")
+        .execute()
+    )
+    users = result.data or []
+    for u in users:
+        if u.get("doctor_id"):
+            doc = client.table("doctors").select("name").eq("id", u["doctor_id"]).execute()
+            u["doctor_name"] = doc.data[0]["name"] if doc.data else "Unknown"
+        else:
+            u["doctor_name"] = None
+    return users
+
+
+def delete_user(user_id: str) -> bool:
+    """Delete a user by ID."""
+    client = get_supabase()
+    result = client.table("users").delete().eq("id", user_id).execute()
+    return bool(result.data)
+
 

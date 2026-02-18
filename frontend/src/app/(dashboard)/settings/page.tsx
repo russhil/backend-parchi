@@ -1,22 +1,51 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
+
+function getInitials(name: string): string {
+    return name
+        .split(" ")
+        .map((n) => n[0])
+        .join("")
+        .toUpperCase()
+        .slice(0, 2);
+}
+
+interface UserInfo {
+    doctor_name: string;
+    clinic_name: string;
+    specialization?: string;
+    role?: string;
+}
 
 export default function SettingsPage() {
     const router = useRouter();
     const [darkMode, setDarkMode] = useState(false);
+    const [userInfo, setUserInfo] = useState<UserInfo | null>(null);
 
-    // Load dark mode preference from localStorage on mount
     useEffect(() => {
         const savedMode = localStorage.getItem("darkMode");
         if (savedMode === "true") {
             setDarkMode(true);
             document.documentElement.classList.add("dark");
         }
+
+        const stored = localStorage.getItem("user_info");
+        if (stored) {
+            try {
+                setUserInfo(JSON.parse(stored));
+            } catch (e) {
+                console.error("Failed to parse user info", e);
+            }
+        }
     }, []);
 
-    // Toggle dark mode
+    const initials = useMemo(
+        () => (userInfo?.doctor_name ? getInitials(userInfo.doctor_name) : "Dr"),
+        [userInfo?.doctor_name]
+    );
+
     const toggleDarkMode = () => {
         const newMode = !darkMode;
         setDarkMode(newMode);
@@ -27,6 +56,13 @@ export default function SettingsPage() {
         } else {
             document.documentElement.classList.remove("dark");
         }
+    };
+
+    const handleSignOut = () => {
+        document.cookie = "auth_token=; path=/; max-age=0; SameSite=Lax";
+        localStorage.removeItem("user_info");
+        router.push("/login");
+        router.refresh();
     };
 
     return (
@@ -47,12 +83,18 @@ export default function SettingsPage() {
                     </h2>
                     <div className="flex items-center gap-4">
                         <div className="w-16 h-16 rounded-full bg-primary flex items-center justify-center text-white text-xl font-bold">
-                            YC
+                            {initials}
                         </div>
                         <div>
-                            <p className="text-lg font-bold text-text-primary">YC</p>
-                            <p className="text-sm text-text-secondary">General Physician</p>
-                            <p className="text-xs text-text-secondary mt-1">yc@parchi.ai</p>
+                            <p className="text-lg font-bold text-text-primary">
+                                {userInfo?.doctor_name || "Doctor"}
+                            </p>
+                            <p className="text-sm text-text-secondary">
+                                {userInfo?.specialization || userInfo?.role || "Physician"}
+                            </p>
+                            <p className="text-xs text-text-secondary mt-1">
+                                {userInfo?.clinic_name || "Clinic"}
+                            </p>
                         </div>
                     </div>
                 </div>
@@ -93,56 +135,8 @@ export default function SettingsPage() {
                     )}
                 </div>
 
-                {/* Configuration Cards */}
-                <div className="space-y-4">
-                    {/* API Status */}
-                    <div className="bg-surface rounded-xl border border-border-light p-4">
-                        <div className="flex items-center justify-between">
-                            <div className="flex items-center gap-3">
-                                <span className="material-symbols-outlined text-primary">api</span>
-                                <div>
-                                    <p className="text-sm font-semibold text-text-primary">API Connection</p>
-                                    <p className="text-xs text-text-secondary">Supabase + Google AI</p>
-                                </div>
-                            </div>
-                            <span className="flex items-center gap-1 text-xs font-medium text-green-600">
-                                <span className="w-2 h-2 bg-green-500 rounded-full" />
-                                Connected
-                            </span>
-                        </div>
-                    </div>
-
-                    {/* Database */}
-                    <div className="bg-surface rounded-xl border border-border-light p-4">
-                        <div className="flex items-center justify-between">
-                            <div className="flex items-center gap-3">
-                                <span className="material-symbols-outlined text-primary">database</span>
-                                <div>
-                                    <p className="text-sm font-semibold text-text-primary">Database</p>
-                                    <p className="text-xs text-text-secondary">Supabase PostgreSQL</p>
-                                </div>
-                            </div>
-                            <span className="text-xs text-text-secondary">xhizybtbsbref...supabase.co</span>
-                        </div>
-                    </div>
-
-                    {/* AI Model */}
-                    <div className="bg-surface rounded-xl border border-border-light p-4">
-                        <div className="flex items-center justify-between">
-                            <div className="flex items-center gap-3">
-                                <span className="material-symbols-outlined text-primary">smart_toy</span>
-                                <div>
-                                    <p className="text-sm font-semibold text-text-primary">AI Model</p>
-                                    <p className="text-xs text-text-secondary">Google Gemma-3-27b-it</p>
-                                </div>
-                            </div>
-                            <span className="text-xs text-text-secondary">via Google AI Studio</span>
-                        </div>
-                    </div>
-                </div>
-
                 {/* Quick Links */}
-                <div className="mt-8">
+                <div className="mb-6">
                     <h2 className="text-sm font-bold text-text-secondary uppercase tracking-wide mb-4">
                         Quick Actions
                     </h2>
@@ -164,10 +158,20 @@ export default function SettingsPage() {
                     </div>
                 </div>
 
+                {/* Sign Out */}
+                <div className="mb-8">
+                    <button
+                        onClick={handleSignOut}
+                        className="w-full flex items-center justify-center gap-2 p-3 bg-surface rounded-xl border border-red-200 text-red-600 hover:bg-red-50 hover:border-red-300 transition font-medium text-sm"
+                    >
+                        <span className="material-symbols-outlined text-[20px]">logout</span>
+                        Sign Out
+                    </button>
+                </div>
+
                 {/* Version Info */}
-                <div className="mt-8 text-center text-xs text-text-secondary">
-                    <p>Parchi.ai v1.0.0 (MVP)</p>
-                    <p className="mt-1">Built with Next.js, FastAPI, Supabase, Google AI</p>
+                <div className="text-center text-xs text-text-secondary">
+                    <p>Parchi v1.0.0</p>
                 </div>
             </div>
         </div>

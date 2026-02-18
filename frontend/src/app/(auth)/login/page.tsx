@@ -41,6 +41,7 @@ export default function LoginPage() {
                     clinic_name: data.clinic_name,
                     doctor_id: data.doctor_id,
                     doctor_name: data.doctor_name,
+                    specialization: data.specialization,
                     role: data.role
                 }));
                 router.push('/');
@@ -134,6 +135,15 @@ export default function LoginPage() {
                         </button>
                     </div>
                 </form>
+
+                <div className="text-center pt-2">
+                    <a
+                        href="/admin/login"
+                        className="text-xs text-text-secondary hover:text-primary transition-colors"
+                    >
+                        Admin Panel →
+                    </a>
+                </div>
             </div>
         </div>
     );

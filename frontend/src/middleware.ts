@@ -6,11 +6,22 @@ export function middleware(request: NextRequest) {
     const path = request.nextUrl.pathname;
 
     // Define public paths that don't require authentication
-    const isPublicPath = path === '/login' || path === '/landing' || path === '/landing2' || path === '/privacy-policy' || path === '/terms-of-service' || path.startsWith('/intake');
+    const isPublicPath = path === '/login' || path === '/landing' || path === '/landing2' || path === '/privacy-policy' || path === '/terms-of-service' || path.startsWith('/intake') || path === '/admin/login';
 
-    // Check for the auth cookie
-    // Note: In a real app, you'd verify the token signature/validity
+    // Admin paths use a separate admin_token cookie
+    const isAdminPath = path.startsWith('/admin') && path !== '/admin/login';
+
+    // Check for the auth cookies
     const token = request.cookies.get('auth_token')?.value;
+    const adminToken = request.cookies.get('admin_token')?.value;
+
+    // Handle admin paths separately
+    if (isAdminPath) {
+        if (!adminToken) {
+            return NextResponse.redirect(new URL('/admin/login', request.nextUrl));
+        }
+        return NextResponse.next();
+    }
 
     // 1. If user is on a public path (login) and has a token, redirect to dashboard
     if (isPublicPath && token) {

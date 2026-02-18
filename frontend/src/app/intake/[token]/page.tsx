@@ -2,8 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { getIntakeToken, verifyIntakePhone, submitIntakeToken } from "@/lib/api";
-import Script from "next/script";
+import { getIntakeToken, submitIntakeToken } from "@/lib/api";
 
 // --- Components ---
 
@@ -148,7 +147,7 @@ export default function IntakeTokenPage() {
                     }));
                 }
 
-                setStep(1); // Go to Verify step
+                setStep(2); // Go to Intake Form directly
             } catch (err: any) {
                 setError(err.message);
                 setStep(99); // Error state
@@ -159,27 +158,7 @@ export default function IntakeTokenPage() {
         fetchToken();
     }, [params.token]);
 
-    // Handle Phone Verification
-    useEffect(() => {
-        (window as any).phoneEmailListener = async (userObj: any) => {
-            const tokenStr = Array.isArray(params.token) ? params.token[0] : params.token;
-            const user_json_url = userObj.user_json_url;
-            if (!tokenStr) return;
 
-            setLoading(true);
-            try {
-                await verifyIntakePhone(tokenStr, user_json_url);
-                // Success -> Go to form
-                setStep(2);
-
-            } catch (err: any) {
-                console.error(err);
-                setError(err.message);
-            } finally {
-                setLoading(false);
-            }
-        };
-    }, [params.token]);
 
     const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
         if (!e.target.files) return;
@@ -257,7 +236,7 @@ export default function IntakeTokenPage() {
 
     return (
         <div className="min-h-screen bg-neutral-50 dark:bg-neutral-900 flex items-center justify-center p-6 font-sans text-neutral-900 dark:text-neutral-100">
-            <Script src="https://www.phone.email/sign_in_button_v1.js" strategy="lazyOnload" />
+
 
             <div className="w-full max-w-2xl bg-white dark:bg-neutral-800 rounded-3xl shadow-2xl overflow-hidden border border-neutral-100 dark:border-neutral-700">
 
@@ -276,21 +255,6 @@ export default function IntakeTokenPage() {
                     {error && (
                         <div className="mb-6 p-4 bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400 rounded-xl border border-red-100 dark:border-red-900/30 flex items-center gap-2 text-sm">
                             ⚠️ {error}
-                        </div>
-                    )}
-
-                    {step === 1 && (
-                        <div className="space-y-6 text-center animate-in fade-in slide-in-from-bottom-4 duration-500">
-                            <h2 className="text-xl font-semibold mb-2 text-neutral-800 dark:text-neutral-100">Verify Your Identity</h2>
-                            <p className="text-neutral-500 dark:text-neutral-400 mb-8">
-                                Please verify the phone number ending in <span className="font-bold text-neutral-900 dark:text-neutral-100">...{tokenData?.phone_masked}</span> to continue.
-                            </p>
-
-                            <div className="flex justify-center">
-                                <div className="pe_signin_button" data-client-id="15432560783753349440"></div>
-                            </div>
-
-                            {loading && <p className="text-sm text-blue-600 mt-4 animate-pulse">Verifying...</p>}
                         </div>
                     )}
 

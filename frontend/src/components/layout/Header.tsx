@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter, usePathname } from "next/navigation";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import Image from "next/image";
 import { search } from "@/lib/api";
 
@@ -9,6 +9,18 @@ export default function Header() {
   const router = useRouter();
   const pathname = usePathname();
   const [query, setQuery] = useState("");
+  const [userInfo, setUserInfo] = useState<{ doctor_name: string; clinic_name: string } | null>(null);
+
+  useEffect(() => {
+    const stored = localStorage.getItem("user_info");
+    if (stored) {
+      try {
+        setUserInfo(JSON.parse(stored));
+      } catch (e) {
+        console.error("Failed to parse user info", e);
+      }
+    }
+  }, []);
 
   // Hide header on public pages
   if (pathname === '/login' || pathname === '/landing' || pathname === '/landing2' || pathname === '/privacy-policy' || pathname === '/terms-of-service' || pathname.startsWith('/intake/')) return null;
@@ -28,9 +40,16 @@ export default function Header() {
   };
 
   return (
-    <header className="h-14 md:h-16 bg-surface border-b border-border-light flex items-center justify-between px-4 md:px-6">
-      <div className="flex items-center gap-2 md:gap-3 md:hidden">
-        <Image src="/logo.png" alt="Parchi" width={44} height={44} className="rounded-full" />
+    <header className="h-16 bg-surface border-b border-border-light flex items-center justify-between px-6 sticky top-0 z-40">
+      <div className="flex items-center gap-3">
+        <h1 className="text-xl font-bold text-text-primary">
+          {userInfo?.clinic_name || "Clinic Dashboard"}
+        </h1>
+        {userInfo?.doctor_name && (
+          <span className="text-sm text-text-secondary bg-gray-100 px-2 py-0.5 rounded-full">
+            {userInfo.doctor_name}
+          </span>
+        )}
       </div>
 
       <form onSubmit={handleSearch} className="hidden md:flex flex-1 max-w-md mx-8">

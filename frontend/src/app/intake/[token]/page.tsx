@@ -10,9 +10,9 @@ import Script from "next/script";
 function Input({ label, ...props }: any) {
     return (
         <div className="mb-4">
-            <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">{label}</label>
+            <label className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-1">{label}</label>
             <input
-                className="w-full px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-600 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/50 dark:bg-slate-700/50 backdrop-blur-sm text-slate-900 dark:text-slate-100"
+                className="w-full px-4 py-2 rounded-lg border border-neutral-200 dark:border-neutral-600 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/50 dark:bg-neutral-700/50 backdrop-blur-sm text-neutral-900 dark:text-neutral-100"
                 {...props}
             />
         </div>
@@ -22,9 +22,9 @@ function Input({ label, ...props }: any) {
 function TextArea({ label, ...props }: any) {
     return (
         <div className="mb-4">
-            <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">{label}</label>
+            <label className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-1">{label}</label>
             <textarea
-                className="w-full px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-600 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/50 dark:bg-slate-700/50 backdrop-blur-sm min-h-[100px] text-slate-900 dark:text-slate-100"
+                className="w-full px-4 py-2 rounded-lg border border-neutral-200 dark:border-neutral-600 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/50 dark:bg-neutral-700/50 backdrop-blur-sm min-h-[100px] text-neutral-900 dark:text-neutral-100"
                 {...props}
             />
         </div>
@@ -34,9 +34,9 @@ function TextArea({ label, ...props }: any) {
 function Select({ label, options, ...props }: any) {
     return (
         <div className="mb-4">
-            <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">{label}</label>
+            <label className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-1">{label}</label>
             <select
-                className="w-full px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-600 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/50 dark:bg-slate-700/50 backdrop-blur-sm text-slate-900 dark:text-slate-100"
+                className="w-full px-4 py-2 rounded-lg border border-neutral-200 dark:border-neutral-600 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/50 dark:bg-neutral-700/50 backdrop-blur-sm text-neutral-900 dark:text-neutral-100"
                 {...props}
             >
                 {options.map((opt: string) => (
@@ -51,7 +51,7 @@ function Button({ children, isLoading, onClick, variant = "primary" }: any) {
     const base = "w-full py-3 rounded-xl font-semibold transition-all shadow-lg active:scale-95";
     const styles = variant === "primary"
         ? "bg-gradient-to-r from-blue-600 to-indigo-600 text-white hover:from-blue-700 hover:to-indigo-700 shadow-blue-500/20"
-        : "bg-white dark:bg-slate-700 text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-600 hover:bg-slate-50 dark:hover:bg-slate-600";
+        : "bg-white dark:bg-neutral-700 text-neutral-700 dark:text-neutral-200 border border-neutral-200 dark:border-neutral-600 hover:bg-neutral-50 dark:hover:bg-neutral-600";
 
     return (
         <button
@@ -75,7 +75,7 @@ function MultiSelect({ label, options, selected, onChange }: any) {
 
     return (
         <div className="mb-4">
-            <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">{label}</label>
+            <label className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-2">{label}</label>
             <div className="flex flex-wrap gap-2">
                 {options.map((opt: string) => {
                     const isActive = selected.includes(opt);
@@ -86,7 +86,7 @@ function MultiSelect({ label, options, selected, onChange }: any) {
                             onClick={() => toggle(opt)}
                             className={`px-3 py-1.5 rounded-full text-sm font-medium transition-all ${isActive
                                 ? "bg-blue-600 text-white shadow-md shadow-blue-500/30"
-                                : "bg-white dark:bg-slate-700 border border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-600"
+                                : "bg-white dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-600 text-neutral-600 dark:text-neutral-300 hover:bg-neutral-50 dark:hover:bg-neutral-600"
                                 }`}
                         >
                             {opt}
@@ -238,16 +238,16 @@ export default function IntakeTokenPage() {
     };
 
     if (loading && step === 0) {
-        return <div className="min-h-screen flex items-center justify-center bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-slate-100">Loading...</div>;
+        return <div className="min-h-screen flex items-center justify-center bg-neutral-50 dark:bg-neutral-900 text-neutral-900 dark:text-neutral-100">Loading...</div>;
     }
 
     if (step === 99) {
         return (
-            <div className="min-h-screen flex items-center justify-center bg-slate-50 dark:bg-slate-900 p-6">
-                <div className="bg-white dark:bg-slate-800 p-8 rounded-xl shadow-xl text-center max-w-md border border-slate-100 dark:border-slate-700">
+            <div className="min-h-screen flex items-center justify-center bg-neutral-50 dark:bg-neutral-900 p-6">
+                <div className="bg-white dark:bg-neutral-800 p-8 rounded-xl shadow-xl text-center max-w-md border border-neutral-100 dark:border-neutral-700">
                     <div className="text-red-500 text-5xl mb-4">⚠️</div>
-                    <h1 className="text-xl font-bold text-slate-900 dark:text-slate-100 mb-2">Link Expired or Invalid</h1>
-                    <p className="text-slate-600 dark:text-slate-400">{error}</p>
+                    <h1 className="text-xl font-bold text-neutral-900 dark:text-neutral-100 mb-2">Link Expired or Invalid</h1>
+                    <p className="text-neutral-600 dark:text-neutral-400">{error}</p>
                 </div>
             </div>
         );
@@ -256,10 +256,10 @@ export default function IntakeTokenPage() {
     const isNewPatient = tokenData?.is_new_patient;
 
     return (
-        <div className="min-h-screen bg-slate-50 dark:bg-slate-900 flex items-center justify-center p-6 font-sans text-slate-900 dark:text-slate-100">
+        <div className="min-h-screen bg-neutral-50 dark:bg-neutral-900 flex items-center justify-center p-6 font-sans text-neutral-900 dark:text-neutral-100">
             <Script src="https://www.phone.email/sign_in_button_v1.js" strategy="lazyOnload" />
 
-            <div className="w-full max-w-2xl bg-white dark:bg-slate-800 rounded-3xl shadow-2xl overflow-hidden border border-slate-100 dark:border-slate-700">
+            <div className="w-full max-w-2xl bg-white dark:bg-neutral-800 rounded-3xl shadow-2xl overflow-hidden border border-neutral-100 dark:border-neutral-700">
 
                 {/* Header */}
                 <div className="bg-gradient-to-r from-blue-600 to-indigo-600 p-8 text-white relative overflow-hidden">
@@ -281,9 +281,9 @@ export default function IntakeTokenPage() {
 
                     {step === 1 && (
                         <div className="space-y-6 text-center animate-in fade-in slide-in-from-bottom-4 duration-500">
-                            <h2 className="text-xl font-semibold mb-2 text-slate-800 dark:text-slate-100">Verify Your Identity</h2>
-                            <p className="text-slate-500 dark:text-slate-400 mb-8">
-                                Please verify the phone number ending in <span className="font-bold text-slate-900 dark:text-slate-100">...{tokenData?.phone_masked}</span> to continue.
+                            <h2 className="text-xl font-semibold mb-2 text-neutral-800 dark:text-neutral-100">Verify Your Identity</h2>
+                            <p className="text-neutral-500 dark:text-neutral-400 mb-8">
+                                Please verify the phone number ending in <span className="font-bold text-neutral-900 dark:text-neutral-100">...{tokenData?.phone_masked}</span> to continue.
                             </p>
 
                             <div className="flex justify-center">
@@ -296,16 +296,16 @@ export default function IntakeTokenPage() {
 
                     {step === 2 && (
                         <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
-                            <h2 className="text-xl font-semibold mb-4 text-slate-800 dark:text-slate-100">Appointment Details</h2>
+                            <h2 className="text-xl font-semibold mb-4 text-neutral-800 dark:text-neutral-100">Appointment Details</h2>
 
                             {tokenData?.appointment_time && (
                                 <div className="bg-blue-50 dark:bg-blue-900/20 p-4 rounded-xl border border-blue-100 dark:border-blue-800 mb-8 flex items-center gap-4">
-                                    <div className="w-12 h-12 bg-white dark:bg-slate-700 rounded-lg flex items-center justify-center text-2xl shadow-sm">
+                                    <div className="w-12 h-12 bg-white dark:bg-neutral-700 rounded-lg flex items-center justify-center text-2xl shadow-sm">
                                         📅
                                     </div>
                                     <div>
                                         <p className="text-xs text-blue-600 dark:text-blue-400 font-bold uppercase tracking-wider">Scheduled Visit</p>
-                                        <p className="text-slate-900 dark:text-slate-100 font-semibold">
+                                        <p className="text-neutral-900 dark:text-neutral-100 font-semibold">
                                             {new Date(tokenData.appointment_time).toLocaleString(undefined, {
                                                 dateStyle: 'full',
                                                 timeStyle: 'short'
@@ -317,8 +317,8 @@ export default function IntakeTokenPage() {
 
                             {/* Only show profile fields if new patient */}
                             {isNewPatient && (
-                                <div className="space-y-4 border-b dark:border-slate-700 pb-6 mb-6">
-                                    <h3 className="text-sm font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider mb-4">Patient Profile</h3>
+                                <div className="space-y-4 border-b dark:border-neutral-700 pb-6 mb-6">
+                                    <h3 className="text-sm font-bold text-neutral-400 dark:text-neutral-500 uppercase tracking-wider mb-4">Patient Profile</h3>
 
                                     <div className="grid grid-cols-2 gap-4">
                                         <Input label="Date of Birth" type="date" value={formData.dob} onChange={(e: any) => handleChange("dob", e.target.value)} required />
@@ -369,7 +369,7 @@ export default function IntakeTokenPage() {
                                 </div>
                             )}
 
-                            <h3 className="text-sm font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider mb-4">Visit Information</h3>
+                            <h3 className="text-sm font-bold text-neutral-400 dark:text-neutral-500 uppercase tracking-wider mb-4">Visit Information</h3>
 
                             <Input
                                 label="Reason for Visit"
@@ -388,8 +388,8 @@ export default function IntakeTokenPage() {
                             />
 
                             <div className="mb-4">
-                                <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">Upload Prior Records / Labs</label>
-                                <div className="border-2 border-dashed border-slate-200 dark:border-slate-600 rounded-xl p-8 text-center hover:bg-slate-50 dark:hover:bg-slate-700/50 transition-colors cursor-pointer relative group">
+                                <label className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-2">Upload Prior Records / Labs</label>
+                                <div className="border-2 border-dashed border-neutral-200 dark:border-neutral-600 rounded-xl p-8 text-center hover:bg-neutral-50 dark:hover:bg-neutral-700/50 transition-colors cursor-pointer relative group">
                                     <input
                                         type="file"
                                         accept=".pdf,.jpg,.png"
@@ -397,7 +397,7 @@ export default function IntakeTokenPage() {
                                         onChange={handleFileUpload}
                                         className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
                                     />
-                                    <p className="text-slate-400 dark:text-slate-500 text-sm">Click to upload files</p>
+                                    <p className="text-neutral-400 dark:text-neutral-500 text-sm">Click to upload files</p>
                                 </div>
                                 {formData.documents.length > 0 && (
                                     <ul className="mt-4 space-y-2">
@@ -421,8 +421,8 @@ export default function IntakeTokenPage() {
                             <div className="w-24 h-24 bg-green-100 text-green-600 rounded-full flex items-center justify-center mx-auto mb-6 text-4xl shadow-green-200 shadow-xl">
                                 ✓
                             </div>
-                            <h2 className="text-3xl font-bold text-slate-900 dark:text-slate-100 mb-2">You're all set!</h2>
-                            <p className="text-slate-600 dark:text-slate-400 mb-8 max-w-md mx-auto">
+                            <h2 className="text-3xl font-bold text-neutral-900 dark:text-neutral-100 mb-2">You're all set!</h2>
+                            <p className="text-neutral-600 dark:text-neutral-400 mb-8 max-w-md mx-auto">
                                 Your information has been securely received. See you at your appointment.
                             </p>
                         </div>

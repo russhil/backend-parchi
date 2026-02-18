@@ -431,6 +431,7 @@ def login(req: LoginRequest):
             "token_type": "bearer",
             "clinic_id": user_info["clinic_id"],
             "clinic_name": user_info["clinic_name"],
+            "doctor_id": user_info["doctor_id"],
             "doctor_name": user_info["doctor_name"],
             "role": user_info["role"],
         }
@@ -2106,12 +2107,12 @@ async def upload_parchi(file: UploadFile = File(...)):
 
 
 @app.post("/parchi/process")
-def process_parchi(req: ParchiProcessRequest, x_clinic_id: str = Header(None)):
+def process_parchi(req: ParchiProcessRequest, x_clinic_id: str = Header(None), x_doctor_id: str = Header(None)):
     """
     Process reviewed parchi entries:
     1. For each entry: check patient (by phone), create if new
-    2. Create appointment
-    3. Create intake token
+    2. Create appointment (scoped to clinic + doctor)
+    3. Create intake token (scoped to clinic + doctor)
     4. Send WhatsApp with intake link
     """
     results = []
@@ -2133,7 +2134,7 @@ def process_parchi(req: ParchiProcessRequest, x_clinic_id: str = Header(None)):
         }
 
         try:
-            # 1. Check if patient exists by phone
+            # 1. Check if patient exists by phone — scoped to this clinic
             clean_phone = entry.phone.replace("+", "").replace(" ", "").replace("-", "")
             existing = find_patient_duplicate(phone=clean_phone, clinic_id=x_clinic_id)
             if not existing:
@@ -2156,15 +2157,15 @@ def process_parchi(req: ParchiProcessRequest, x_clinic_id: str = Header(None)):
 
             entry_result["patient_id"] = pid
 
-            # 2. Check for duplicate appointment (same patient + same time)
-            existing_appt = find_existing_appointment(pid, entry.appointment_time)
+            # 2. Check for duplicate appointment — scoped to this clinic
+            existing_appt = find_existing_appointment(pid, entry.appointment_time, clinic_id=x_clinic_id)
             if existing_appt:
                 logger.info("[Parchi] Duplicate appointment found for %s at %s — skipping", entry.name, entry.appointment_time)
                 entry_result["is_duplicate"] = True
                 entry_result["appointment_id"] = existing_appt["id"]
                 continue  # Skip creating appointment, token, and WhatsApp
 
-            # 3. Create appointment
+            # 3. Create appointment — tagged with clinic + doctor
             appt_id = f"a-{uuid.uuid4().hex[:8]}"
             appt_data = {
                 "id": appt_id,
@@ -2173,31 +2174,30 @@ def process_parchi(req: ParchiProcessRequest, x_clinic_id: str = Header(None)):
                 "status": "scheduled",
                 "reason": "Intake Pending",
             }
-            create_appointment(appt_data, clinic_id=x_clinic_id)
+            create_appointment(appt_data, clinic_id=x_clinic_id, doctor_id=x_doctor_id)
             entry_result["appointment_id"] = appt_id
 
-            # 3. Create intake token
+            # 4. Create intake token — tagged with clinic + doctor
             token_str = str(uuid.uuid4())
             token_data = {
                 "token": token_str,
                 "patient_id": pid,
                 "appointment_id": appt_id,
                 "phone": entry.phone,
-                # "is_new_patient": entry_result["is_new_patient"], (Column missing in DB)
             }
-            create_intake_token(token_data)
+            create_intake_token(token_data, clinic_id=x_clinic_id, doctor_id=x_doctor_id)
 
             intake_link = f"{base_url}/intake/{token_str}"
             entry_result["intake_link"] = intake_link
 
-            # 4. Format appointment time for display
+            # 5. Format appointment time for display
             try:
                 appt_dt = datetime.fromisoformat(entry.appointment_time)
                 display_time = appt_dt.strftime("%B %d, %Y at %I:%M %p")
             except ValueError:
                 display_time = entry.appointment_time
 
-            # 5. Send WhatsApp
+            # 6. Send WhatsApp
             wa_result = send_intake_whatsapp(
                 phone=entry.phone,
                 patient_name=entry.name,
@@ -2241,9 +2241,9 @@ if __name__ == "__main__":
 # --- Routes: Intake Form ---
 
 @app.post("/intake/check")
-def check_patient_duplicate(req: IntakeCheckRequest):
-    """Check if patient exists."""
-    existing = find_patient_duplicate(email=req.email, phone=req.phone, name=req.name)
+def check_patient_duplicate(req: IntakeCheckRequest, x_clinic_id: str = Header(None)):
+    """Check if patient exists — scoped to the requesting clinic."""
+    existing = find_patient_duplicate(email=req.email, phone=req.phone, name=req.name, clinic_id=x_clinic_id)
     if existing:
         return {"exists": True, "patient_id": existing["id"], "name": existing["name"]}
     return {"exists": False}
@@ -2319,8 +2319,8 @@ async def upload_file_endpoint(file: UploadFile = File(...)):
 
 
 @app.post("/intake/submit")
-def submit_intake(req: IntakeSubmitRequest):
-    """Handle final intake submission."""
+def submit_intake(req: IntakeSubmitRequest, x_clinic_id: str = Header(None)):
+    """Handle final intake submission — scoped to clinic."""
     try:
         patient_id = req.patient_id
         
@@ -2346,21 +2346,11 @@ def submit_intake(req: IntakeSubmitRequest):
                 "conditions": req.conditions,
                 "medications": req.medications,
                 "allergies": req.allergies,
-                # Store history in vitals or description? Schema doesn't have history column.
-                # We'll put it in a clinical dump or store it in vitals for reference?
-                # Actually, the user requirement mapped "history" to "Detailed Medical History".
-                # database schema doesn't have a history column.
-                # We will create a clinical dump for it or prepend to conditions?
-                # Let's create a Note or Clinical Dump.
             }
-            patient = create_patient(patient_data)
+            patient = create_patient(patient_data, clinic_id=x_clinic_id)
             patient_id = patient["id"]
         
-        # 2. Create Appointment
-        # Next available slot? For MVP just schedule for "tomorrow 9am" or leave as requested.
-        # User prompt said "start_time (default to next available slot or null)"
-        # The schema says start_time is NOT NULL. So we must set it.
-        # Let's set it to tomorrow 9am for now.
+        # 2. Create Appointment — scoped to clinic
         tomorrow = datetime.now() + timedelta(days=1)
         tomorrow_9am = tomorrow.replace(hour=9, minute=0, second=0, microsecond=0)
         
@@ -2370,27 +2360,33 @@ def submit_intake(req: IntakeSubmitRequest):
             "reason": req.reason,
             "status": "scheduled"
         }
-        appt = create_appointment(appt_data)
+        appt = create_appointment(appt_data, clinic_id=x_clinic_id)
         
         # 3. Create Documents
         for doc in req.documents:
-            create_document({
+            doc_data = {
                 "patient_id": patient_id,
                 "title": doc.get("name", "Uploaded Document"),
                 "doc_type": "patient_upload",
                 "file_url": doc["url"],
                 "extracted_text": "" # Pending OCR
-            })
+            }
+            if x_clinic_id:
+                doc_data["clinic_id"] = x_clinic_id
+            create_document(doc_data)
             
-        # 4. Create Clinical Dump (Symptoms + History)
+        # 4. Create Clinical Dump (Symptoms + History) — tagged with clinic
         dump_text = f"Patient Reported Symptoms:\n{req.symptoms}\n\nPatient Reported History:\n{req.history}"
-        create_clinical_dump({
+        dump_data = {
             "id": f"dump-{uuid.uuid4()}",
             "patient_id": patient_id,
             "appointment_id": appt["id"],
             "manual_notes": dump_text,
             "combined_dump": dump_text
-        })
+        }
+        if x_clinic_id:
+            dump_data["clinic_id"] = x_clinic_id
+        create_clinical_dump(dump_data)
         
         return {"success": True, "patient_id": patient_id, "appointment_id": appt["id"]}
         
@@ -2400,14 +2396,15 @@ def submit_intake(req: IntakeSubmitRequest):
 
 
 @app.get("/patients/search-simple")
-def simple_search_patients(q: str):
-    """Simple search for patients by name or phone."""
+def simple_search_patients(q: str, x_clinic_id: str = Header(None)):
+    """Simple search for patients by name or phone — scoped to clinic."""
     client = get_supabase()
-    query = client.table("patients").select("id, name, phone")
     
-    # Supabase doesn't support complex OR in a single filter easily without RPC or postgrest syntax
-    # We'll fetch and filter in memory for 'simple' if q is short, or use .or_
-    res = client.table("patients").select("id, name, phone").or_(f"name.ilike.%{q}%,phone.ilike.%{q}%").execute()
+    # Build query scoped to clinic
+    base_query = client.table("patients").select("id, name, phone")
+    if x_clinic_id:
+        base_query = base_query.eq("clinic_id", x_clinic_id)
+    res = base_query.or_(f"name.ilike.%{q}%,phone.ilike.%{q}%").execute()
     
     # De-duplicate by phone to avoid showing the same person multiple times
     seen_phones = set()
@@ -2428,12 +2425,12 @@ def simple_search_patients(q: str):
 # --- Routes: Intake Setup (Receptionist) & Public Intake ---
 
 @app.post("/setup-intake/create")
-def create_setup_intake(req: SetupIntakeRequest, x_clinic_id: str = Header(None)):
+def create_setup_intake(req: SetupIntakeRequest, x_clinic_id: str = Header(None), x_doctor_id: str = Header(None)):
     """
     Receptionist creates an intake request (token).
-    1. Creates/Gets Patient.
-    2. Creates Appointment.
-    3. Creates Token.
+    1. Creates/Gets Patient — scoped to clinic.
+    2. Creates Appointment — tagged with clinic + doctor.
+    3. Creates Token — tagged with clinic + doctor.
     """
     # 1. Handle Patient
     is_new = False
@@ -2441,6 +2438,9 @@ def create_setup_intake(req: SetupIntakeRequest, x_clinic_id: str = Header(None)
         patient = get_patient(req.patient_id)
         if not patient:
             raise HTTPException(status_code=404, detail="Patient not found")
+        # Security: verify patient belongs to this clinic
+        if patient.get("clinic_id") and x_clinic_id and patient["clinic_id"] != x_clinic_id:
+            raise HTTPException(status_code=403, detail="Patient does not belong to this clinic")
         pid = req.patient_id
     else:
         existing = find_patient_duplicate(phone=req.phone, clinic_id=x_clinic_id)
@@ -2459,20 +2459,14 @@ def create_setup_intake(req: SetupIntakeRequest, x_clinic_id: str = Header(None)
             except Exception as e:
                 raise HTTPException(status_code=500, detail=f"Failed to create patient: {e}")
 
-    # 2. Check for Duplicate Appointment
+    # 2. Check for Duplicate Appointment — scoped to clinic
     try:
-        # Check if patient already has a scheduled appointment at this exact time
-        # This prevents accidental double-clicks from creating duplicate records
-        client = get_supabase()
-        existing_appt = client.table("appointments") \
-            .select("id") \
-            .eq("patient_id", pid) \
-            .eq("start_time", req.appointment_time) \
-            .execute()
+        existing_appt = find_existing_appointment(pid, req.appointment_time, clinic_id=x_clinic_id)
             
-        if existing_appt.data:
+        if existing_appt:
             # We already have an appointment. Let's see if there's a token for it.
-            appt_id = existing_appt.data[0]["id"]
+            appt_id = existing_appt["id"]
+            client = get_supabase()
             existing_token = client.table("intake_tokens") \
                 .select("token") \
                 .eq("appointment_id", appt_id) \
@@ -2492,20 +2486,19 @@ def create_setup_intake(req: SetupIntakeRequest, x_clinic_id: str = Header(None)
             "status": "scheduled",
             "reason": "Intake Pending"
         }
-        create_appointment(appt_data, clinic_id=x_clinic_id)
+        create_appointment(appt_data, clinic_id=x_clinic_id, doctor_id=x_doctor_id)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to handle appointment: {e}")
 
-    # 3. Create Token
+    # 3. Create Token — tagged with clinic + doctor
     try:
         token_data = {
             "token": str(uuid.uuid4()),
             "patient_id": pid,
             "appointment_id": appt_id,
             "phone": req.phone
-            # "is_new_patient": is_new (Column missing in DB, temporarily disabled)
         }
-        create_intake_token(token_data)
+        create_intake_token(token_data, clinic_id=x_clinic_id, doctor_id=x_doctor_id)
         
         # Return link
         base_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
@@ -2581,13 +2574,21 @@ def verify_intake_token_phone(req: IntakeTokenVerifyRequest):
 
 @app.post("/intake/token/submit")
 def submit_intake_token(req: IntakeTokenSubmitRequest):
-    """Submit the intake form via token."""
+    """Submit the intake form via token — all records tagged with token's clinic."""
     data = get_intake_token(req.token)
     if not data or data["status"] != "pending":
         raise HTTPException(status_code=400, detail="Invalid or used token")
         
     pid = data["patient_id"]
     appt_id = data["appointment_id"]
+    
+    # Resolve clinic_id from the token's linked appointment
+    token_clinic_id = data.get("clinic_id")
+    if not token_clinic_id:
+        # Fallback: get clinic_id from the appointment
+        appt_data = data.get("appointments")
+        if appt_data and isinstance(appt_data, dict):
+            token_clinic_id = appt_data.get("clinic_id")
     
     # Update Patient
     p_updates = {}
@@ -2614,40 +2615,49 @@ def submit_intake_token(req: IntakeTokenSubmitRequest):
     # Update Appointment
     update_appointment(appt_id, {
         "reason": req.reason,
-        "status": "confirmed" # or similar
+        "status": "confirmed"
     })
     
-    # Save History/Symptoms as Note or Clinical Dump
+    # Save History/Symptoms as Note — tagged with clinic
     note_content = f"Intake Form Submission:\n\nHistory: {req.history}\nSymptoms: {req.symptoms}\nReason: {req.reason}"
-    create_note({
+    note_data = {
         "patient_id": pid,
         "content": note_content,
         "note_type": "intake"
-    })
+    }
+    if token_clinic_id:
+        note_data["clinic_id"] = token_clinic_id
+    create_note(note_data)
 
-    # Also create clinical dump for AI processing
-    create_clinical_dump({
-            "id": f"dump-{uuid.uuid4()}",
-            "patient_id": pid,
-            "appointment_id": appt_id,
-            "manual_notes": note_content,
-            "combined_dump": note_content
-    })
+    # Also create clinical dump for AI processing — tagged with clinic
+    dump_data = {
+        "id": f"dump-{uuid.uuid4()}",
+        "patient_id": pid,
+        "appointment_id": appt_id,
+        "manual_notes": note_content,
+        "combined_dump": note_content
+    }
+    if token_clinic_id:
+        dump_data["clinic_id"] = token_clinic_id
+    create_clinical_dump(dump_data)
     
-    # Save Documents
+    # Save Documents — tagged with clinic
     for doc in req.documents:
         file_url = doc.get("url")
         extracted_text = ""
         if file_url:
             extracted_text = extract_text_from_url(file_url)
             
-        create_document({
-             "patient_id": pid,
-             "title": doc.get("name", "Intake Document"),
-             "doc_type": "patient_upload",
-             "file_url": file_url,
-             "extracted_text": extracted_text
-        })
+        doc_data = {
+            "patient_id": pid,
+            "title": doc.get("name", "Intake Document"),
+            "doc_type": "patient_upload",
+            "file_url": file_url,
+            "extracted_text": extracted_text
+        }
+        if token_clinic_id:
+            doc_data["clinic_id"] = token_clinic_id
+        create_document(doc_data)
         
     # Mark token used
     update_intake_token(req.token, {"status": "completed"})

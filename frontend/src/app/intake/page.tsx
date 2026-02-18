@@ -9,9 +9,9 @@ import Script from "next/script";
 function Input({ label, ...props }: any) {
     return (
         <div className="mb-4">
-            <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">{label}</label>
+            <label className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-1">{label}</label>
             <input
-                className="w-full px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-600 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/50 dark:bg-slate-700/50 backdrop-blur-sm text-slate-900 dark:text-slate-100"
+                className="w-full px-4 py-2 rounded-lg border border-neutral-200 dark:border-neutral-600 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/50 dark:bg-neutral-700/50 backdrop-blur-sm text-neutral-900 dark:text-neutral-100"
                 {...props}
             />
         </div>
@@ -21,9 +21,9 @@ function Input({ label, ...props }: any) {
 function TextArea({ label, ...props }: any) {
     return (
         <div className="mb-4">
-            <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">{label}</label>
+            <label className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-1">{label}</label>
             <textarea
-                className="w-full px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-600 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/50 dark:bg-slate-700/50 backdrop-blur-sm min-h-[100px] text-slate-900 dark:text-slate-100"
+                className="w-full px-4 py-2 rounded-lg border border-neutral-200 dark:border-neutral-600 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/50 dark:bg-neutral-700/50 backdrop-blur-sm min-h-[100px] text-neutral-900 dark:text-neutral-100"
                 {...props}
             />
         </div>
@@ -33,9 +33,9 @@ function TextArea({ label, ...props }: any) {
 function Select({ label, options, ...props }: any) {
     return (
         <div className="mb-4">
-            <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">{label}</label>
+            <label className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-1">{label}</label>
             <select
-                className="w-full px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-600 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/50 dark:bg-slate-700/50 backdrop-blur-sm text-slate-900 dark:text-slate-100"
+                className="w-full px-4 py-2 rounded-lg border border-neutral-200 dark:border-neutral-600 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/50 dark:bg-neutral-700/50 backdrop-blur-sm text-neutral-900 dark:text-neutral-100"
                 {...props}
             >
                 {options.map((opt: string) => (
@@ -50,7 +50,7 @@ function Button({ children, isLoading, onClick, variant = "primary" }: any) {
     const base = "w-full py-3 rounded-xl font-semibold transition-all shadow-lg active:scale-95";
     const styles = variant === "primary"
         ? "bg-gradient-to-r from-blue-600 to-indigo-600 text-white hover:from-blue-700 hover:to-indigo-700 shadow-blue-500/20"
-        : "bg-white dark:bg-slate-700 text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-600 hover:bg-slate-50 dark:hover:bg-slate-600";
+        : "bg-white dark:bg-neutral-700 text-neutral-700 dark:text-neutral-200 border border-neutral-200 dark:border-neutral-600 hover:bg-neutral-50 dark:hover:bg-neutral-600";
 
     return (
         <button
@@ -74,7 +74,7 @@ function MultiSelect({ label, options, selected, onChange }: any) {
 
     return (
         <div className="mb-4">
-            <label className="block text-sm font-medium text-slate-700 mb-2">{label}</label>
+            <label className="block text-sm font-medium text-neutral-700 mb-2">{label}</label>
             <div className="flex flex-wrap gap-2">
                 {options.map((opt: string) => {
                     const isActive = selected.includes(opt);
@@ -85,7 +85,7 @@ function MultiSelect({ label, options, selected, onChange }: any) {
                             onClick={() => toggle(opt)}
                             className={`px-3 py-1.5 rounded-full text-sm font-medium transition-all ${isActive
                                 ? "bg-blue-600 text-white shadow-md shadow-blue-500/30"
-                                : "bg-white dark:bg-slate-700 border border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-600"
+                                : "bg-white dark:bg-neutral-700 border border-neutral-200 dark:border-neutral-600 text-neutral-600 dark:text-neutral-300 hover:bg-neutral-50 dark:hover:bg-neutral-600"
                                 }`}
                         >
                             {opt}
@@ -258,10 +258,10 @@ export default function IntakePage() {
     // --- Renders ---
 
     return (
-        <div className="min-h-screen bg-slate-50 dark:bg-slate-900 flex items-center justify-center p-6 font-sans text-slate-900 dark:text-slate-100">
+        <div className="min-h-screen bg-neutral-50 dark:bg-neutral-900 flex items-center justify-center p-6 font-sans text-neutral-900 dark:text-neutral-100">
             <Script src="https://www.phone.email/sign_in_button_v1.js" strategy="lazyOnload" />
 
-            <div className="w-full max-w-2xl bg-white dark:bg-slate-800 rounded-3xl shadow-2xl overflow-hidden border border-slate-100 dark:border-slate-700">
+            <div className="w-full max-w-2xl bg-white dark:bg-neutral-800 rounded-3xl shadow-2xl overflow-hidden border border-neutral-100 dark:border-neutral-700">
 
                 {/* Header */}
                 <div className="bg-gradient-to-r from-blue-600 to-indigo-600 p-8 text-white relative overflow-hidden">
@@ -270,8 +270,8 @@ export default function IntakePage() {
                         <p className="text-blue-100">Parchi.ai Clinic • Secure Form</p>
                     </div>
                     {/* Decorative circles */}
-                    <div className="absolute top-0 right-0 w-64 h-64 bg-white/10 rounded-full -translate-y-1/2 translate-x-1/2 blur-2xl" />
-                    <div className="absolute bottom-0 left-0 w-32 h-32 bg-indigo-500/30 rounded-full translate-y-1/2 -translate-x-1/2 blur-xl" />
+                    <div className="absolute top-0 right-0 w-64 h-64 bg-white/10 rounded-full -tranneutral-y-1/2 tranneutral-x-1/2 blur-2xl" />
+                    <div className="absolute bottom-0 left-0 w-32 h-32 bg-indigo-500/30 rounded-full tranneutral-y-1/2 -tranneutral-x-1/2 blur-xl" />
                 </div>
 
                 {/* content */}
@@ -284,8 +284,8 @@ export default function IntakePage() {
 
                     {step === 1 && (
                         <div className="space-y-6 text-center animate-in fade-in slide-in-from-bottom-4 duration-500">
-                            <h2 className="text-xl font-semibold mb-2 text-slate-800 dark:text-slate-100">Verify Your Phone Number</h2>
-                            <p className="text-slate-500 dark:text-slate-400 mb-8">
+                            <h2 className="text-xl font-semibold mb-2 text-neutral-800 dark:text-neutral-100">Verify Your Phone Number</h2>
+                            <p className="text-neutral-500 dark:text-neutral-400 mb-8">
                                 To protect your medical records, please verify your phone number to continue.
                             </p>
 
@@ -300,8 +300,8 @@ export default function IntakePage() {
 
                     {step === 3 && (
                         <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
-                            <h2 className="text-xl font-semibold mb-4 text-slate-800 dark:text-slate-100">New Patient Profile</h2>
-                            <p className="text-slate-500 dark:text-slate-400 text-sm mb-4">You are verified as {formData.phone}. Please complete your profile.</p>
+                            <h2 className="text-xl font-semibold mb-4 text-neutral-800 dark:text-neutral-100">New Patient Profile</h2>
+                            <p className="text-neutral-500 dark:text-neutral-400 text-sm mb-4">You are verified as {formData.phone}. Please complete your profile.</p>
 
                             <Input label="Full Name" value={formData.name} onChange={(e: any) => handleChange("name", e.target.value)} placeholder="Jane Doe" required />
 
@@ -360,7 +360,7 @@ export default function IntakePage() {
 
                     {step === 4 && (
                         <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
-                            <h2 className="text-xl font-semibold mb-4 text-slate-800 dark:text-slate-100">Visit Details</h2>
+                            <h2 className="text-xl font-semibold mb-4 text-neutral-800 dark:text-neutral-100">Visit Details</h2>
                             {existingPatient && (
                                 <p className="text-green-600 dark:text-green-400 bg-green-50 dark:bg-green-900/20 p-2 rounded-lg text-sm mb-4">
                                     Welcome back, {existingPatient.name}.
@@ -384,8 +384,8 @@ export default function IntakePage() {
                             />
 
                             <div className="mb-4">
-                                <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">Upload Documents (Labs, Referrals)</label>
-                                <div className="border-2 border-dashed border-slate-200 dark:border-slate-600 rounded-xl p-8 text-center hover:bg-slate-50 dark:hover:bg-slate-700/50 transition-colors cursor-pointer relative group">
+                                <label className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-2">Upload Documents (Labs, Referrals)</label>
+                                <div className="border-2 border-dashed border-neutral-200 dark:border-neutral-600 rounded-xl p-8 text-center hover:bg-neutral-50 dark:hover:bg-neutral-700/50 transition-colors cursor-pointer relative group">
                                     <input
                                         type="file"
                                         accept=".pdf,.jpg,.png"
@@ -393,7 +393,7 @@ export default function IntakePage() {
                                         onChange={handleFileUpload}
                                         className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
                                     />
-                                    <div className="text-slate-400 dark:text-slate-500 group-hover:text-blue-500 transition-colors">
+                                    <div className="text-neutral-400 dark:text-neutral-500 group-hover:text-blue-500 transition-colors">
                                         <svg className="w-10 h-10 mx-auto mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path></svg>
                                         <p className="text-sm">Click to upload or drag and drop</p>
                                         <p className="text-xs mt-1">PDF, JPG, PNG up to 10MB</p>
@@ -424,8 +424,8 @@ export default function IntakePage() {
                             <div className="w-24 h-24 bg-green-100 text-green-600 rounded-full flex items-center justify-center mx-auto mb-6 text-4xl shadow-green-200 shadow-xl">
                                 ✓
                             </div>
-                            <h2 className="text-3xl font-bold text-slate-900 dark:text-slate-100 mb-2">You're all set!</h2>
-                            <p className="text-slate-600 dark:text-slate-400 mb-8 max-w-md mx-auto">
+                            <h2 className="text-3xl font-bold text-neutral-900 dark:text-neutral-100 mb-2">You're all set!</h2>
+                            <p className="text-neutral-600 dark:text-neutral-400 mb-8 max-w-md mx-auto">
                                 Your information has been securely received. Our team is reviewing your details and will be ready for your appointment.
                             </p>
                             <Button onClick={() => window.location.reload()}>

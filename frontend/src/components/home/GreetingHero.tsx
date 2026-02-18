@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import dynamic from "next/dynamic";
 
 // Dynamically import to avoid SSR issues with audio APIs
@@ -8,11 +8,26 @@ const GeminiLiveChat = dynamic(() => import("./GeminiLiveChat"), { ssr: false })
 
 export default function GreetingHero() {
   const [showVoiceChat, setShowVoiceChat] = useState(false);
+  const [doctorName, setDoctorName] = useState("Doctor");
+
+  useEffect(() => {
+    const stored = localStorage.getItem("user_info");
+    if (stored) {
+      try {
+        const userInfo = JSON.parse(stored);
+        if (userInfo.doctor_name) {
+          setDoctorName(userInfo.doctor_name);
+        }
+      } catch (e) {
+        console.error("Failed to parse user info", e);
+      }
+    }
+  }, []);
 
   return (
     <div className="text-center mb-6 md:mb-8 w-full max-w-2xl">
       <h2 className="text-2xl md:text-3xl font-bold text-text-primary mb-2">
-        Hi YC, how can I help you today?
+        Hi {doctorName}, how can I help you today?
       </h2>
       <p className="text-text-secondary text-sm md:text-base px-4">
         Your AI assistant is ready to help with patient records, diagnoses, and documentation.

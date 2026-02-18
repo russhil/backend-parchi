@@ -101,8 +101,8 @@ def search_patients(query: str, clinic_id: str) -> list[dict]:
             if allergy and query_lower in str(allergy).lower():
                 add_match(pid, p_name, f"Allergy: {allergy}")
 
-    # 2. Search Clinical Dumps
-    dumps = client.table("clinical_dumps").select("patient_id, combined_dump, transcript_text, manual_notes").execute().data or []
+    # 2. Search Clinical Dumps — scoped to clinic patients only
+    dumps = client.table("clinical_dumps").select("patient_id, combined_dump, transcript_text, manual_notes").eq("clinic_id", clinic_id).execute().data or []
     for d in dumps:
         pid = d["patient_id"]
         if pid not in patient_map: continue
@@ -112,8 +112,8 @@ def search_patients(query: str, clinic_id: str) -> list[dict]:
             snippet = text[max(0, text.lower().find(query_lower)-30):min(len(text), text.lower().find(query_lower)+100)]
             add_match(pid, patient_map[pid], f"Clinical Dump match: ...{snippet}...")
 
-    # 3. Search Notes
-    notes = client.table("notes").select("patient_id, content").execute().data or []
+    # 3. Search Notes — scoped to clinic
+    notes = client.table("notes").select("patient_id, content").eq("clinic_id", clinic_id).execute().data or []
     for n in notes:
         pid = n["patient_id"]
         if pid not in patient_map: continue
@@ -124,8 +124,8 @@ def search_patients(query: str, clinic_id: str) -> list[dict]:
             snippet = content[max(0, idx-30):min(len(content), idx+100)]
             add_match(pid, patient_map[pid], f"Note match: ...{snippet}...")
 
-    # 4. Search Visits
-    visits = client.table("visits").select("patient_id, summary_ai, doctor_notes_text").execute().data or []
+    # 4. Search Visits — scoped to clinic
+    visits = client.table("visits").select("patient_id, summary_ai, doctor_notes_text").eq("clinic_id", clinic_id).execute().data or []
     for v in visits:
         pid = v["patient_id"]
         if pid not in patient_map: continue
@@ -135,8 +135,8 @@ def search_patients(query: str, clinic_id: str) -> list[dict]:
             snippet = text[max(0, text.lower().find(query_lower)-30):min(len(text), text.lower().find(query_lower)+100)]
             add_match(pid, patient_map[pid], f"Visit match: ...{snippet}...")
 
-    # 5. Search Report Insights
-    reports = client.table("report_insights").select("patient_id, insight_text").execute().data or []
+    # 5. Search Report Insights — scoped to clinic
+    reports = client.table("report_insights").select("patient_id, insight_text").eq("clinic_id", clinic_id).execute().data or []
     for r in reports:
         pid = r["patient_id"]
         if pid not in patient_map: continue
@@ -146,8 +146,8 @@ def search_patients(query: str, clinic_id: str) -> list[dict]:
             snippet = text[max(0, text.lower().find(query_lower)-30):min(len(text), text.lower().find(query_lower)+100)]
             add_match(pid, patient_map[pid], f"Report Insight match: ...{snippet}...")
 
-    # 6. Search AI Intake Summaries
-    intakes = client.table("ai_intake_summaries").select("patient_id, summary_text").execute().data or []
+    # 6. Search AI Intake Summaries — scoped to clinic
+    intakes = client.table("ai_intake_summaries").select("patient_id, summary_text").eq("clinic_id", clinic_id).execute().data or []
     for i in intakes:
         pid = i["patient_id"]
         if pid not in patient_map: continue
@@ -181,7 +181,8 @@ def update_patient(patient_id: str, updates: dict) -> dict:
 
 
 def find_patient_duplicate(email: str = None, phone: str = None, name: str = None, clinic_id: str = None) -> Optional[dict]:
-    """Find patient by email, phone, or name (simple match), scoped to clinic."""
+    """Find patient by email, phone, or name (simple match), scoped to clinic.
+    clinic_id is required for proper data isolation."""
     client = get_supabase()
     
     # 1. Try Email
@@ -198,6 +199,13 @@ def find_patient_duplicate(email: str = None, phone: str = None, name: str = Non
         q = client.table("patients").select("*").eq("phone", phone)
         if clinic_id:
             q = q.eq("clinic_id", clinic_id)
+        res = q.execute()
+        if res.data:
+            return res.data[0]
+
+    # 3. Try Name (only if clinic_id is provided for safety)
+    if name and clinic_id:
+        q = client.table("patients").select("*").ilike("name", f"%{name}%").eq("clinic_id", clinic_id)
         res = q.execute()
         if res.data:
             return res.data[0]
@@ -364,23 +372,28 @@ def get_all_appointments(clinic_id: str) -> list[dict]:
     return result.data or []
 
 
-def find_existing_appointment(patient_id: str, start_time: str) -> Optional[dict]:
-    """Check if an appointment already exists for this patient at this time."""
+def find_existing_appointment(patient_id: str, start_time: str, clinic_id: str = None) -> Optional[dict]:
+    """Check if an appointment already exists for this patient at this time, scoped to clinic."""
     client = get_supabase()
-    result = (
+    q = (
         client.table("appointments")
         .select("*")
         .eq("patient_id", patient_id)
         .eq("start_time", start_time)
-        .execute()
     )
+    if clinic_id:
+        q = q.eq("clinic_id", clinic_id)
+    result = q.execute()
     return result.data[0] if result.data else None
 
 
-def create_appointment(appointment_data: dict, clinic_id: str) -> dict:
-    """Create a new appointment."""
+def create_appointment(appointment_data: dict, clinic_id: str = None, doctor_id: str = None) -> dict:
+    """Create a new appointment, tagged with clinic and doctor."""
     client = get_supabase()
-    appointment_data["clinic_id"] = clinic_id
+    if clinic_id:
+        appointment_data["clinic_id"] = clinic_id
+    if doctor_id:
+        appointment_data["doctor_id"] = doctor_id
     result = client.table("appointments").insert(appointment_data).execute()
     return result.data[0] if result.data else {}
 
@@ -811,9 +824,13 @@ def verify_login(username: str, password_plain: str, clinic_slug: str) -> dict |
 
 # --- Intake Request (Token) Operations ---
 
-def create_intake_token(data: dict) -> dict:
-    """Create a new intake token."""
+def create_intake_token(data: dict, clinic_id: str = None, doctor_id: str = None) -> dict:
+    """Create a new intake token, tagged with clinic and doctor."""
     client = get_supabase()
+    if clinic_id:
+        data["clinic_id"] = clinic_id
+    if doctor_id:
+        data["doctor_id"] = doctor_id
     result = client.table("intake_tokens").insert(data).execute()
     return result.data[0] if result.data else {}
 

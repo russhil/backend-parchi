@@ -1,8 +1,5 @@
 import type { Metadata } from "next";
 import "./globals.css";
-import Sidebar from "@/components/layout/Sidebar";
-import Header from "@/components/layout/Header";
-import LayoutShell from "@/components/layout/LayoutShell";
 
 export const metadata: Metadata = {
   title: "Parchi.ai — AI Medical Records",
@@ -45,14 +42,8 @@ export default function RootLayout({
           }}
         />
       </head>
-      <body className="antialiased font-sans flex min-h-screen bg-bg">
-        <Sidebar />
-        <LayoutShell>
-          <Header />
-          <main className="flex-1 overflow-auto">
-            {children}
-          </main>
-        </LayoutShell>
+      <body className="antialiased font-sans min-h-screen bg-bg">
+        {children}
       </body>
     </html>
   );

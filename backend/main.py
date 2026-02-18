@@ -661,7 +661,7 @@ def create_new_patient(req: PatientRequest, current_user: auth.User = Depends(au
             patient_data["vitals"] = req.vitals
         
         logger.info(f"Patient data prepared: {patient_data}")
-        patient = create_patient(patient_data, clinic_id=current_user.clinic_id)
+        patient = create_patient(patient_data, clinic_id=current_user.clinic_id, doctor_id=current_user.doctor_id)
         logger.info(f"Patient created successfully: {patient}")
         
         # Include the phone in the response even if not stored in DB yet
@@ -855,7 +855,7 @@ def create_new_appointment(req: AppointmentRequest, current_user: auth.User = De
         "start_time": req.start_time,
         "status": req.status,
         "reason": req.reason,
-    }, clinic_id=current_user.clinic_id)
+    }, clinic_id=current_user.clinic_id, doctor_id=current_user.doctor_id)
     return {"appointment": appointment}
     
 @app.post("/appointments/mark-seen")
@@ -2162,7 +2162,7 @@ def process_parchi(req: ParchiProcessRequest, x_clinic_id: str = Header(None), x
                     "name": entry.name,
                     "phone": entry.phone,
                 }
-                new_patient = create_patient(p_data, clinic_id=x_clinic_id)
+                new_patient = create_patient(p_data, clinic_id=x_clinic_id, doctor_id=x_doctor_id)
                 pid = new_patient["id"]
 
             entry_result["patient_id"] = pid
@@ -2288,7 +2288,7 @@ def verify_phone_token(req: IntakeVerifyRequest):
         full_phone = f"{user_country_code}{user_phone_number}"
         
         # Check if this phone number exists in our DB
-        existing = find_patient_duplicate(phone=full_phone)
+        existing = find_patient_duplicate(phone=full_phone, clinic_id=None)  # Global phone lookup for verification
         
         return {
             "success": True, 
@@ -2330,8 +2330,8 @@ async def upload_file_endpoint(file: UploadFile = File(...)):
 
 
 @app.post("/intake/submit")
-def submit_intake(req: IntakeSubmitRequest, x_clinic_id: str = Header(None)):
-    """Handle final intake submission — scoped to clinic."""
+def submit_intake(req: IntakeSubmitRequest, x_clinic_id: str = Header(None), x_doctor_id: str = Header(None)):
+    """Handle final intake submission — scoped to clinic + doctor."""
     try:
         patient_id = req.patient_id
         
@@ -2358,7 +2358,7 @@ def submit_intake(req: IntakeSubmitRequest, x_clinic_id: str = Header(None)):
                 "medications": req.medications,
                 "allergies": req.allergies,
             }
-            patient = create_patient(patient_data, clinic_id=x_clinic_id)
+            patient = create_patient(patient_data, clinic_id=x_clinic_id, doctor_id=x_doctor_id)
             patient_id = patient["id"]
         
         # 2. Create Appointment — scoped to clinic
@@ -2371,7 +2371,7 @@ def submit_intake(req: IntakeSubmitRequest, x_clinic_id: str = Header(None)):
             "reason": req.reason,
             "status": "scheduled"
         }
-        appt = create_appointment(appt_data, clinic_id=x_clinic_id)
+        appt = create_appointment(appt_data, clinic_id=x_clinic_id, doctor_id=x_doctor_id)
         
         # 3. Create Documents
         for doc in req.documents:
@@ -2407,14 +2407,16 @@ def submit_intake(req: IntakeSubmitRequest, x_clinic_id: str = Header(None)):
 
 
 @app.get("/patients/search-simple")
-def simple_search_patients(q: str, x_clinic_id: str = Header(None)):
-    """Simple search for patients by name or phone — scoped to clinic."""
+def simple_search_patients(q: str, x_clinic_id: str = Header(None), x_doctor_id: str = Header(None)):
+    """Simple search for patients by name or phone — scoped to clinic + doctor."""
     client = get_supabase()
     
-    # Build query scoped to clinic
+    # Build query scoped to clinic and doctor
     base_query = client.table("patients").select("id, name, phone")
     if x_clinic_id:
         base_query = base_query.eq("clinic_id", x_clinic_id)
+    if x_doctor_id:
+        base_query = base_query.eq("doctor_id", x_doctor_id)
     res = base_query.or_(f"name.ilike.%{q}%,phone.ilike.%{q}%").execute()
     
     # De-duplicate by phone to avoid showing the same person multiple times
@@ -2465,7 +2467,7 @@ def create_setup_intake(req: SetupIntakeRequest, x_clinic_id: str = Header(None)
                     "name": req.name,
                     "phone": req.phone
                 }
-                new_p = create_patient(p_data, clinic_id=x_clinic_id)
+                new_p = create_patient(p_data, clinic_id=x_clinic_id, doctor_id=x_doctor_id)
                 pid = new_p["id"]
             except Exception as e:
                 raise HTTPException(status_code=500, detail=f"Failed to create patient: {e}")
@@ -2535,6 +2537,7 @@ def get_intake_token_details(token: str):
          raise HTTPException(status_code=400, detail="Token already used")
 
     patient = data.get("patients")
+    doctor = data.get("doctors")
     
     # Mask data? Or just return what is needed.
     # We need name/phone for verification UI.
@@ -2544,6 +2547,7 @@ def get_intake_token_details(token: str):
         "patient_name": patient["name"],
         "appointment_time": data["appointments"]["start_time"],
         "is_new_patient": data.get("is_new_patient", False),
+        "doctor_name": doctor.get("name") if doctor else None,
         "patient_details": {
             "dob": patient.get("dob"), 
             "gender": patient.get("gender"),

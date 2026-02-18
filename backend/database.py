@@ -56,10 +56,13 @@ def get_doctor(doctor_id: str) -> Optional[dict]:
         return None
 
 
-def get_all_patients(clinic_id: str) -> list[dict]:
-    """Fetch all patients for a specific clinic."""
+def get_all_patients(clinic_id: str, doctor_id: str = None) -> list[dict]:
+    """Fetch all patients for a specific clinic, optionally scoped to a doctor."""
     client = get_supabase()
-    result = client.table("patients").select("*").eq("clinic_id", clinic_id).order("name").execute()
+    q = client.table("patients").select("*").eq("clinic_id", clinic_id)
+    if doctor_id:
+        q = q.eq("doctor_id", doctor_id)
+    result = q.order("name").execute()
     return result.data or []
 
 
@@ -84,7 +87,6 @@ def search_patients(query: str, clinic_id: str) -> list[dict]:
         matches[pid]["matched_snippets"].append(snippet)
 
     # 1. Search Patients Table (Memory-based for arrays)
-    p_query = client.table("patients").select("*")
     p_query = client.table("patients").select("*").eq("clinic_id", clinic_id)
     patients = p_query.execute().data or []
     patient_map = {p["id"]: (p.get("name") or "Unknown") for p in patients}
@@ -171,11 +173,13 @@ def search_patients(query: str, clinic_id: str) -> list[dict]:
     return list(matches.values())
 
 
-def create_patient(patient_data: dict, clinic_id: str) -> dict:
-    """Create a new patient."""
+def create_patient(patient_data: dict, clinic_id: str, doctor_id: str = None) -> dict:
+    """Create a new patient, tagged with clinic and doctor."""
     try:
         client = get_supabase()
         patient_data["clinic_id"] = clinic_id
+        if doctor_id:
+            patient_data["doctor_id"] = doctor_id
         result = client.table("patients").insert(patient_data).execute()
         return result.data[0] if result.data else {}
     except Exception as e:
@@ -191,8 +195,8 @@ def update_patient(patient_id: str, updates: dict) -> dict:
 
 
 
-def find_patient_duplicate(email: str = None, phone: str = None, name: str = None, clinic_id: str = None) -> Optional[dict]:
-    """Find patient by email, phone, or name (simple match), scoped to clinic.
+def find_patient_duplicate(email: str = None, phone: str = None, name: str = None, clinic_id: str = None, doctor_id: str = None) -> Optional[dict]:
+    """Find patient by email, phone, or name (simple match), scoped to clinic and optionally doctor.
     clinic_id is required for proper data isolation."""
     client = get_supabase()
     
@@ -201,6 +205,8 @@ def find_patient_duplicate(email: str = None, phone: str = None, name: str = Non
         q = client.table("patients").select("*").eq("email", email)
         if clinic_id:
             q = q.eq("clinic_id", clinic_id)
+        if doctor_id:
+            q = q.eq("doctor_id", doctor_id)
         res = q.execute()
         if res.data:
             return res.data[0]
@@ -210,6 +216,8 @@ def find_patient_duplicate(email: str = None, phone: str = None, name: str = Non
         q = client.table("patients").select("*").eq("phone", phone)
         if clinic_id:
             q = q.eq("clinic_id", clinic_id)
+        if doctor_id:
+            q = q.eq("doctor_id", doctor_id)
         res = q.execute()
         if res.data:
             return res.data[0]
@@ -217,6 +225,8 @@ def find_patient_duplicate(email: str = None, phone: str = None, name: str = Non
     # 3. Try Name (only if clinic_id is provided for safety)
     if name and clinic_id:
         q = client.table("patients").select("*").ilike("name", f"%{name}%").eq("clinic_id", clinic_id)
+        if doctor_id:
+            q = q.eq("doctor_id", doctor_id)
         res = q.execute()
         if res.data:
             return res.data[0]
@@ -285,13 +295,17 @@ def delete_appointment_retain(appointment_id: str) -> bool:
     import uuid
     from datetime import datetime as _dt
     dump_id = f"dump-{uuid.uuid4()}"
-    client.table("clinical_dumps").insert({
+    dump_data = {
         "id": dump_id,
         "patient_id": patient_id,
         "manual_notes": "\n".join(retained_parts),
         "combined_dump": "\n".join(retained_parts),
         "created_at": _dt.now().isoformat(),
-    }).execute()
+    }
+    # Preserve clinic_id from the original appointment
+    if appt_data.get("clinic_id"):
+        dump_data["clinic_id"] = appt_data["clinic_id"]
+    client.table("clinical_dumps").insert(dump_data).execute()
 
     # 4. Delete appointment-linked data (but NOT documents)
     client.table("clinical_dumps").delete().eq("appointment_id", appointment_id).execute()
@@ -344,18 +358,11 @@ def get_appointments_for_patient(patient_id: str) -> list[dict]:
 
 
 def get_todays_appointments(clinic_id: str) -> list[dict]:
-    """Fetch today's appointments with patient info, optionally scoped to a clinic."""
+    """Fetch today's appointments with patient info, scoped to a clinic."""
     client = get_supabase()
     today = datetime.now().date().isoformat()
     tomorrow = (datetime.now().date().replace(day=datetime.now().day + 1)).isoformat()
     
-    query = (
-        client.table("appointments")
-        .select("*, patients(id, name)")
-        .gte("start_time", today)
-        .lt("start_time", tomorrow)
-    )
-    # Always filter by clinic_id
     query = (
         client.table("appointments")
         .select("*, patients(id, name)")
@@ -368,12 +375,8 @@ def get_todays_appointments(clinic_id: str) -> list[dict]:
 
 
 def get_all_appointments(clinic_id: str) -> list[dict]:
-    """Fetch all appointments with patient info, optionally scoped to a clinic."""
+    """Fetch all appointments with patient info, scoped to a clinic."""
     client = get_supabase()
-    query = (
-        client.table("appointments")
-        .select("*, patients(id, name)")
-    )
     query = (
         client.table("appointments")
         .select("*, patients(id, name)")
@@ -383,7 +386,7 @@ def get_all_appointments(clinic_id: str) -> list[dict]:
     return result.data or []
 
 
-def find_existing_appointment(patient_id: str, start_time: str, clinic_id: str = None) -> Optional[dict]:
+def find_existing_appointment(patient_id: str, start_time: str, clinic_id: str) -> Optional[dict]:
     """Check if an appointment already exists for this patient at this time, scoped to clinic."""
     client = get_supabase()
     q = (
@@ -391,18 +394,16 @@ def find_existing_appointment(patient_id: str, start_time: str, clinic_id: str =
         .select("*")
         .eq("patient_id", patient_id)
         .eq("start_time", start_time)
+        .eq("clinic_id", clinic_id)
     )
-    if clinic_id:
-        q = q.eq("clinic_id", clinic_id)
     result = q.execute()
     return result.data[0] if result.data else None
 
 
-def create_appointment(appointment_data: dict, clinic_id: str = None, doctor_id: str = None) -> dict:
+def create_appointment(appointment_data: dict, clinic_id: str, doctor_id: str = None) -> dict:
     """Create a new appointment, tagged with clinic and doctor."""
     client = get_supabase()
-    if clinic_id:
-        appointment_data["clinic_id"] = clinic_id
+    appointment_data["clinic_id"] = clinic_id
     if doctor_id:
         appointment_data["doctor_id"] = doctor_id
     result = client.table("appointments").insert(appointment_data).execute()
@@ -835,11 +836,10 @@ def verify_login(username: str, password_plain: str, clinic_slug: str) -> dict |
 
 # --- Intake Request (Token) Operations ---
 
-def create_intake_token(data: dict, clinic_id: str = None, doctor_id: str = None) -> dict:
+def create_intake_token(data: dict, clinic_id: str, doctor_id: str = None) -> dict:
     """Create a new intake token, tagged with clinic and doctor."""
     client = get_supabase()
-    if clinic_id:
-        data["clinic_id"] = clinic_id
+    data["clinic_id"] = clinic_id
     if doctor_id:
         data["doctor_id"] = doctor_id
     result = client.table("intake_tokens").insert(data).execute()
@@ -847,11 +847,11 @@ def create_intake_token(data: dict, clinic_id: str = None, doctor_id: str = None
 
 
 def get_intake_token(token: str) -> Optional[dict]:
-    """Fetch intake token details."""
+    """Fetch intake token details including doctor info."""
     client = get_supabase()
     result = (
         client.table("intake_tokens")
-        .select("*, patients(*), appointments(*)")
+        .select("*, patients(*), appointments(*), doctors(*)")
         .eq("token", token)
         .execute()
     )

@@ -318,6 +318,10 @@ class ParchiEntry(BaseModel):
 class ParchiProcessRequest(BaseModel):
     entries: list[ParchiEntry]
 
+class IntakeTokenVerifyRequest(BaseModel):
+    token: str
+    user_json_url: str
+
 
 
 class IntakeTokenSubmitRequest(BaseModel):
@@ -2537,6 +2541,39 @@ def get_intake_token_details(token: str):
             "has_history": bool(patient.get("conditions") or patient.get("medications"))
         }
     }
+
+@app.post("/intake/token/verify-phone")
+def verify_intake_token_phone(req: IntakeTokenVerifyRequest):
+    """Verify phone for token access."""
+    import urllib.request
+    
+    data = get_intake_token(req.token)
+    if not data:
+        raise HTTPException(status_code=404, detail="Invalid token")
+
+    try:
+        # Calls Phone Email API to get trusted phone number
+        with urllib.request.urlopen(req.user_json_url) as url:
+            user_data = json.loads(url.read().decode())
+
+        verified_phone = user_data.get("user_phone_number")
+        if not verified_phone:
+            raise HTTPException(status_code=400, detail="Could not verify phone number from provider")
+        
+        # Normalize phones (remove + or spaces)
+        # Assuming database phone is standardized? If not, do simple contains/endswith check
+        db_phone = data["phone"].replace("+","").replace(" ","")[-10:]
+        ver_phone = verified_phone.replace("+","").replace(" ","")[-10:]
+        
+        if db_phone != ver_phone:
+             raise HTTPException(status_code=403, detail="Phone number does not match record")
+             
+        return {"success": True}
+        
+    except Exception as e:
+        logger.error(f"Phone verification error: {e}")
+        raise HTTPException(status_code=500, detail="Phone verification failed")
+
 
 
 

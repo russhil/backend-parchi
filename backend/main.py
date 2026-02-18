@@ -8,15 +8,17 @@ import os
 import uuid
 import io
 from contextlib import asynccontextmanager
+from auth import User
 from datetime import datetime, timedelta
 from typing import AsyncGenerator
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request, UploadFile, File, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File, WebSocket, WebSocketDisconnect, Header, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import google.generativeai as genai
+import auth
 
 import asyncio
 import logging
@@ -24,6 +26,7 @@ import traceback
 from transcription import transcribe_audio
 from llm_provider import init_llm, get_llm
 from database import (
+    verify_login,
     get_patient,
     get_all_patients,
     search_patients,
@@ -61,7 +64,6 @@ from database import (
     update_clinical_dump,
     get_clinical_dumps_for_patient,
     get_clinical_dump,
-    verify_login,
     find_patient_duplicate,
     find_existing_appointment,
     create_intake_token,
@@ -108,6 +110,39 @@ GEMINI_LIVE_MODEL = os.getenv("GEMINI_LIVE_MODEL", "gemini-2.5-flash-native-audi
 logger = logging.getLogger(__name__)
 
 
+SELF_PING_URL = os.getenv(
+    "SELF_PING_URL", "https://backend-parchi.onrender.com/health"
+)
+SELF_PING_INTERVAL = int(os.getenv("SELF_PING_INTERVAL", "300"))  # seconds (default 5 min)
+
+
+async def _keep_alive_ping():
+    """Background task: pings the Render deployment every N seconds to prevent spin-down."""
+    import urllib.request
+    import urllib.error
+
+    logger.info(
+        "Keep-alive pinger started — hitting %s every %d s",
+        SELF_PING_URL,
+        SELF_PING_INTERVAL,
+    )
+    while True:
+        try:
+            await asyncio.sleep(SELF_PING_INTERVAL)
+            req = urllib.request.Request(SELF_PING_URL, method="GET")
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                logger.info(
+                    "Keep-alive ping → %s  (status %s)", SELF_PING_URL, resp.status
+                )
+        except urllib.error.URLError as e:
+            logger.warning("Keep-alive ping failed (URLError): %s", e)
+        except asyncio.CancelledError:
+            logger.info("Keep-alive pinger stopped.")
+            return
+        except Exception as e:
+            logger.warning("Keep-alive ping error: %s", e)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup / shutdown lifecycle for the FastAPI app."""
@@ -121,22 +156,28 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("Could not ensure storage bucket: %s", e)
 
+    # Start keep-alive self-ping background task
+    ping_task = asyncio.create_task(_keep_alive_ping())
+
     yield
 
     # -- Shutdown --
+    ping_task.cancel()
+    try:
+        await ping_task
+    except asyncio.CancelledError:
+        pass
 
 
 app = FastAPI(title="Parchi.ai API", version="1.0.0", lifespan=lifespan)
 
-_cors_origins = os.getenv("CORS_ORIGINS", "").split(",") if os.getenv("CORS_ORIGINS") else [
-    "http://localhost:3000", "http://127.0.0.1:3000",
-    "http://localhost:3001", "http://127.0.0.1:3001",
-    "http://localhost:3002", "http://127.0.0.1:3002",
-]
-# In production, set CORS_ORIGINS=* or to your frontend URL
+# CORS Configuration
+cors_origins_str = os.getenv("CORS_ORIGINS", "*")
+origins = [origin.strip() for origin in cors_origins_str.split(",")]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_cors_origins,
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -182,6 +223,7 @@ class AppointmentRequest(BaseModel):
 class LoginRequest(BaseModel):
     username: str
     password: str
+    clinic_slug: str
 
 
 class PrescriptionRequest(BaseModel):
@@ -360,20 +402,57 @@ async def generate_ai_response_async(prompt: str, max_tokens: int = 1000) -> str
 
 @app.post("/login")
 def login(req: LoginRequest):
-    """Simple login endpoint."""
-    logger.info(f"Login attempt for user: {req.username}")
+    """Login endpoint — returns JWT access token."""
+    logger.info(f"Login attempt for user: {req.username} at clinic: {req.clinic_slug}")
     try:
-        is_valid = verify_login(req.username, req.password)
-        logger.info(f"Login result for {req.username}: {is_valid}")
-        if not is_valid:
-            raise HTTPException(status_code=401, detail="Invalid credentials")
-        return {"success": True, "message": "Login successful"}
+        user_info = verify_login(req.username, req.password, req.clinic_slug)
+        logger.info(f"Login result for {req.username}: {bool(user_info)}")
+        if not user_info:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Incorrect username or password",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        
+        access_token_expires = timedelta(minutes=auth.ACCESS_TOKEN_EXPIRE_MINUTES)
+        access_token = auth.create_access_token(
+            data={
+                "sub": user_info["username"],
+                "user_id": user_info["user_id"], # Fixed key from "id" to "user_id"
+                "clinic_id": user_info["clinic_id"],
+                "doctor_id": user_info["doctor_id"],
+                "role": user_info["role"]
+            },
+            expires_delta=access_token_expires
+        )
+        
+        return {
+            "access_token": access_token,
+            "token_type": "bearer",
+            "clinic_id": user_info["clinic_id"],
+            "clinic_name": user_info["clinic_name"],
+            "doctor_name": user_info["doctor_name"],
+            "role": user_info["role"],
+        }
     except Exception as e:
-        logger.error(f"Login error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Login failed for user {req.username} at clinic {req.clinic_slug}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
 
-# --- Routes: Health Check ---
+@app.get("/me")
+def get_current_user_info(user: User = Depends(auth.get_current_user)):
+    """Return current logged-in user info."""
+    return {
+        "user_id": user.id,
+        "username": user.username,
+        "clinic_id": user.clinic_id,
+        "doctor_id": user.doctor_id,
+        "role": user.role,
+    }
 
 
 @app.get("/health")
@@ -488,18 +567,26 @@ async def gemini_live_websocket(websocket: WebSocket):
 
 
 @app.get("/patients")
-def list_patients():
-    """List all patients."""
-    patients = get_all_patients()
+def list_patients(current_user: auth.User = Depends(auth.get_current_user)):
+    """List all patients, scoped to clinic."""
+    patients = get_all_patients(clinic_id=current_user.clinic_id)
     return {"patients": patients}
 
 
 @app.get("/patient/{patient_id}")
-def get_patient_details(patient_id: str):
+def get_patient_details(patient_id: str, current_user: auth.User = Depends(auth.get_current_user)):
     """Return patient + related data for the patient profile page."""
     patient = get_patient(patient_id)
     if not patient:
         raise HTTPException(status_code=404, detail="Patient not found")
+        
+    # Security check: Ensure patient belongs to current user's clinic
+    if patient.get("clinic_id") and patient.get("clinic_id") != current_user.clinic_id:
+         # If patient has a clinic_id and it doesn't match, deny access
+         # Note: Legacy patients with NULL clinic_id might be accessible if logic permits,
+         # but migration moves them to 'cl-default'.
+         if patient.get("clinic_id") != current_user.clinic_id:
+             raise HTTPException(status_code=403, detail="Access denied to this patient")
 
     # Get appointment summary list for patient page sidebar
     appointments_summary = get_appointments_summary_for_patient(patient_id)
@@ -533,7 +620,7 @@ def get_patient_details(patient_id: str):
 
 
 @app.post("/patients")
-def create_new_patient(req: PatientRequest):
+def create_new_patient(req: PatientRequest, current_user: auth.User = Depends(auth.get_current_user)):
     """Create a new patient."""
     try:
         logger.info(f"Creating patient with name: {req.name}")
@@ -570,7 +657,7 @@ def create_new_patient(req: PatientRequest):
             patient_data["vitals"] = req.vitals
         
         logger.info(f"Patient data prepared: {patient_data}")
-        patient = create_patient(patient_data)
+        patient = create_patient(patient_data, clinic_id=current_user.clinic_id)
         logger.info(f"Patient created successfully: {patient}")
         
         # Include the phone in the response even if not stored in DB yet
@@ -591,7 +678,7 @@ def create_new_patient(req: PatientRequest):
 
 
 @app.post("/search")
-async def search(req: SearchRequest):
+async def search(req: SearchRequest, current_user: auth.User = Depends(auth.get_current_user)):
     """
     AI-powered search across all patient data.
     1. Feeds patient summaries to AI to find matches.
@@ -602,12 +689,12 @@ async def search(req: SearchRequest):
         return {"results": []}
 
     # 1. Fetch all patients and build context
-    all_patients = get_all_patients()
+    all_patients = get_all_patients(clinic_id=current_user.clinic_id)
     if not all_patients:
         return {"results": []}
 
     # Fetch appointments to include in context
-    all_appointments = get_all_appointments()
+    all_appointments = get_all_appointments(clinic_id=current_user.clinic_id)
     appt_map = {}
     for appt in all_appointments:
         pid = appt.get("patient_id")
@@ -733,25 +820,29 @@ async def search(req: SearchRequest):
 
 
 @app.get("/appointments")
-def list_appointments():
-    """List all appointments."""
-    appointments = get_all_appointments()
+def list_appointments(current_user: auth.User = Depends(auth.get_current_user)):
+    """List all appointments, scoped to clinic."""
+    appointments = get_all_appointments(clinic_id=current_user.clinic_id)
     return {"appointments": appointments}
 
 
 @app.get("/appointments/today")
-def list_todays_appointments():
-    """List today's appointments."""
-    appointments = get_todays_appointments()
+def list_todays_appointments(current_user: auth.User = Depends(auth.get_current_user)):
+    """List today's appointments, scoped to clinic."""
+    appointments = get_todays_appointments(clinic_id=current_user.clinic_id)
     return {"appointments": appointments}
 
 
 @app.post("/appointments")
-def create_new_appointment(req: AppointmentRequest):
+def create_new_appointment(req: AppointmentRequest, current_user: auth.User = Depends(auth.get_current_user)):
     """Create a new appointment."""
     patient = get_patient(req.patient_id)
     if not patient:
         raise HTTPException(status_code=404, detail="Patient not found")
+    
+    # Check patient access
+    if patient.get("clinic_id") and patient.get("clinic_id") != current_user.clinic_id:
+        raise HTTPException(status_code=403, detail="Access denied to this patient")
     
     appointment_id = f"a-{uuid.uuid4().hex[:8]}"
     appointment = create_appointment({
@@ -760,13 +851,13 @@ def create_new_appointment(req: AppointmentRequest):
         "start_time": req.start_time,
         "status": req.status,
         "reason": req.reason,
-    })
+    }, clinic_id=current_user.clinic_id)
     return {"appointment": appointment}
-
-
+    
 @app.post("/appointments/mark-seen")
-def mark_patient_seen(req: MarkSeenRequest):
+def mark_patient_seen(req: MarkSeenRequest, current_user: auth.User = Depends(auth.get_current_user)):
     """Mark an appointment as seen/completed."""
+    # Ideally check appointment ownership here
     updated = update_appointment(req.appointment_id, {"status": "completed"})
     if not updated:
         raise HTTPException(status_code=404, detail="Appointment not found")
@@ -2015,7 +2106,7 @@ async def upload_parchi(file: UploadFile = File(...)):
 
 
 @app.post("/parchi/process")
-def process_parchi(req: ParchiProcessRequest):
+def process_parchi(req: ParchiProcessRequest, x_clinic_id: str = Header(None)):
     """
     Process reviewed parchi entries:
     1. For each entry: check patient (by phone), create if new
@@ -2044,10 +2135,10 @@ def process_parchi(req: ParchiProcessRequest):
         try:
             # 1. Check if patient exists by phone
             clean_phone = entry.phone.replace("+", "").replace(" ", "").replace("-", "")
-            existing = find_patient_duplicate(phone=clean_phone)
+            existing = find_patient_duplicate(phone=clean_phone, clinic_id=x_clinic_id)
             if not existing:
                 # Also try with the original format
-                existing = find_patient_duplicate(phone=entry.phone)
+                existing = find_patient_duplicate(phone=entry.phone, clinic_id=x_clinic_id)
 
             if existing:
                 pid = existing["id"]
@@ -2060,7 +2151,7 @@ def process_parchi(req: ParchiProcessRequest):
                     "name": entry.name,
                     "phone": entry.phone,
                 }
-                new_patient = create_patient(p_data)
+                new_patient = create_patient(p_data, clinic_id=x_clinic_id)
                 pid = new_patient["id"]
 
             entry_result["patient_id"] = pid
@@ -2082,7 +2173,7 @@ def process_parchi(req: ParchiProcessRequest):
                 "status": "scheduled",
                 "reason": "Intake Pending",
             }
-            create_appointment(appt_data)
+            create_appointment(appt_data, clinic_id=x_clinic_id)
             entry_result["appointment_id"] = appt_id
 
             # 3. Create intake token
@@ -2092,7 +2183,7 @@ def process_parchi(req: ParchiProcessRequest):
                 "patient_id": pid,
                 "appointment_id": appt_id,
                 "phone": entry.phone,
-                "is_new_patient": entry_result["is_new_patient"],
+                # "is_new_patient": entry_result["is_new_patient"], (Column missing in DB)
             }
             create_intake_token(token_data)
 
@@ -2337,7 +2428,7 @@ def simple_search_patients(q: str):
 # --- Routes: Intake Setup (Receptionist) & Public Intake ---
 
 @app.post("/setup-intake/create")
-def create_setup_intake(req: SetupIntakeRequest):
+def create_setup_intake(req: SetupIntakeRequest, x_clinic_id: str = Header(None)):
     """
     Receptionist creates an intake request (token).
     1. Creates/Gets Patient.
@@ -2352,7 +2443,7 @@ def create_setup_intake(req: SetupIntakeRequest):
             raise HTTPException(status_code=404, detail="Patient not found")
         pid = req.patient_id
     else:
-        existing = find_patient_duplicate(phone=req.phone)
+        existing = find_patient_duplicate(phone=req.phone, clinic_id=x_clinic_id)
         if existing:
             pid = existing["id"]
         else:
@@ -2363,7 +2454,7 @@ def create_setup_intake(req: SetupIntakeRequest):
                     "name": req.name,
                     "phone": req.phone
                 }
-                new_p = create_patient(p_data)
+                new_p = create_patient(p_data, clinic_id=x_clinic_id)
                 pid = new_p["id"]
             except Exception as e:
                 raise HTTPException(status_code=500, detail=f"Failed to create patient: {e}")
@@ -2401,7 +2492,7 @@ def create_setup_intake(req: SetupIntakeRequest):
             "status": "scheduled",
             "reason": "Intake Pending"
         }
-        create_appointment(appt_data)
+        create_appointment(appt_data, clinic_id=x_clinic_id)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to handle appointment: {e}")
 
@@ -2411,8 +2502,8 @@ def create_setup_intake(req: SetupIntakeRequest):
             "token": str(uuid.uuid4()),
             "patient_id": pid,
             "appointment_id": appt_id,
-            "phone": req.phone,
-            "is_new_patient": is_new
+            "phone": req.phone
+            # "is_new_patient": is_new (Column missing in DB, temporarily disabled)
         }
         create_intake_token(token_data)
         

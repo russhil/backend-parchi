@@ -29,6 +29,12 @@ def get_supabase() -> Client:
         print(f"✓ Supabase connected to {SUPABASE_URL}")
     return _supabase_client
 
+# --- Password Helper ---
+# Deferred import to avoid circular dependency if auth imports database
+def verify_password_hash(plain, hashed):
+    from auth import verify_password
+    return verify_password(plain, hashed)
+
 
 # --- Patient Operations ---
 
@@ -39,14 +45,14 @@ def get_patient(patient_id: str) -> Optional[dict]:
     return result.data[0] if result.data else None
 
 
-def get_all_patients() -> list[dict]:
-    """Fetch all patients."""
+def get_all_patients(clinic_id: str) -> list[dict]:
+    """Fetch all patients for a specific clinic."""
     client = get_supabase()
-    result = client.table("patients").select("*").order("name").execute()
+    result = client.table("patients").select("*").eq("clinic_id", clinic_id).order("name").execute()
     return result.data or []
 
 
-def search_patients(query: str) -> list[dict]:
+def search_patients(query: str, clinic_id: str) -> list[dict]:
     """
     Comprehensive search for patients across all records:
     - Demographics, conditions, medications, allergies
@@ -67,7 +73,9 @@ def search_patients(query: str) -> list[dict]:
         matches[pid]["matched_snippets"].append(snippet)
 
     # 1. Search Patients Table (Memory-based for arrays)
-    patients = client.table("patients").select("*").execute().data or []
+    p_query = client.table("patients").select("*")
+    p_query = client.table("patients").select("*").eq("clinic_id", clinic_id)
+    patients = p_query.execute().data or []
     patient_map = {p["id"]: (p.get("name") or "Unknown") for p in patients}
 
     for p in patients:
@@ -152,10 +160,11 @@ def search_patients(query: str) -> list[dict]:
     return list(matches.values())
 
 
-def create_patient(patient_data: dict) -> dict:
+def create_patient(patient_data: dict, clinic_id: str) -> dict:
     """Create a new patient."""
     try:
         client = get_supabase()
+        patient_data["clinic_id"] = clinic_id
         result = client.table("patients").insert(patient_data).execute()
         return result.data[0] if result.data else {}
     except Exception as e:
@@ -171,19 +180,25 @@ def update_patient(patient_id: str, updates: dict) -> dict:
 
 
 
-def find_patient_duplicate(email: str = None, phone: str = None, name: str = None) -> Optional[dict]:
-    """Find patient by email, phone, or name (simple match)."""
+def find_patient_duplicate(email: str = None, phone: str = None, name: str = None, clinic_id: str = None) -> Optional[dict]:
+    """Find patient by email, phone, or name (simple match), scoped to clinic."""
     client = get_supabase()
     
     # 1. Try Email
     if email:
-        res = client.table("patients").select("*").eq("email", email).execute()
+        q = client.table("patients").select("*").eq("email", email)
+        if clinic_id:
+            q = q.eq("clinic_id", clinic_id)
+        res = q.execute()
         if res.data:
             return res.data[0]
             
     # 2. Try Phone
     if phone:
-        res = client.table("patients").select("*").eq("phone", phone).execute()
+        q = client.table("patients").select("*").eq("phone", phone)
+        if clinic_id:
+            q = q.eq("clinic_id", clinic_id)
+        res = q.execute()
         if res.data:
             return res.data[0]
 
@@ -309,32 +324,43 @@ def get_appointments_for_patient(patient_id: str) -> list[dict]:
     return result.data or []
 
 
-def get_todays_appointments() -> list[dict]:
-    """Fetch today's appointments with patient info."""
+def get_todays_appointments(clinic_id: str) -> list[dict]:
+    """Fetch today's appointments with patient info, optionally scoped to a clinic."""
     client = get_supabase()
     today = datetime.now().date().isoformat()
     tomorrow = (datetime.now().date().replace(day=datetime.now().day + 1)).isoformat()
     
-    result = (
+    query = (
         client.table("appointments")
         .select("*, patients(id, name)")
         .gte("start_time", today)
         .lt("start_time", tomorrow)
-        .order("start_time")
-        .execute()
     )
+    # Always filter by clinic_id
+    query = (
+        client.table("appointments")
+        .select("*, patients(id, name)")
+        .eq("clinic_id", clinic_id)
+        .gte("start_time", today)
+        .lt("start_time", tomorrow)
+    )
+    result = query.order("start_time").execute()
     return result.data or []
 
 
-def get_all_appointments() -> list[dict]:
-    """Fetch all appointments with patient info."""
+def get_all_appointments(clinic_id: str) -> list[dict]:
+    """Fetch all appointments with patient info, optionally scoped to a clinic."""
     client = get_supabase()
-    result = (
+    query = (
         client.table("appointments")
         .select("*, patients(id, name)")
-        .order("start_time", desc=True)
-        .execute()
     )
+    query = (
+        client.table("appointments")
+        .select("*, patients(id, name)")
+        .eq("clinic_id", clinic_id)
+    )
+    result = query.order("start_time", desc=True).execute()
     return result.data or []
 
 
@@ -351,9 +377,10 @@ def find_existing_appointment(patient_id: str, start_time: str) -> Optional[dict
     return result.data[0] if result.data else None
 
 
-def create_appointment(appointment_data: dict) -> dict:
+def create_appointment(appointment_data: dict, clinic_id: str) -> dict:
     """Create a new appointment."""
     client = get_supabase()
+    appointment_data["clinic_id"] = clinic_id
     result = client.table("appointments").insert(appointment_data).execute()
     return result.data[0] if result.data else {}
 
@@ -721,21 +748,65 @@ def get_clinical_dump(dump_id: str) -> Optional[dict]:
 
 # --- Auth Operations ---
 
-def verify_login(username: str, password_plain: str) -> bool:
+def verify_login(username: str, password_plain: str, clinic_slug: str) -> dict | None:
     """
-    Verify login credentials.
+    Verify login credentials and return clinic/doctor info.
     WARNING: Currently checking plain text password as requested for MVP.
+    Returns dict with clinic_id, clinic_name, doctor_id, doctor_name, role on success.
     """
     client = get_supabase()
-    # Check if user exists with matching username and password
+    
+    # 1. Resolve clinic_slug to clinic_id
+    clinic_res = client.table("clinics").select("id, name").eq("slug", clinic_slug).execute()
+    if not clinic_res.data:
+        return None # Clinic not found
+    
+    clinic_data = clinic_res.data[0]
+    target_clinic_id = clinic_data["id"]
+    clinic_name = clinic_data["name"]
+
+    # 2. Check user credentials matches username AND clinic_id
+    # We query by username first, then check password and clinic
     result = (
         client.table("users")
-        .select("id")
+        .select("id, clinic_id, doctor_id, password_hash")
         .eq("username", username)
-        .eq("password_hash", password_plain)  # Using the column we created
+        .eq("clinic_id", target_clinic_id)
         .execute()
     )
-    return bool(result.data)
+    
+    if not result.data:
+        return None
+    
+    user = result.data[0]
+    
+    # Verify password (using the deferred helper)
+    if not verify_password_hash(password_plain, user["password_hash"]):
+        return None
+        
+    doctor_id = user.get("doctor_id")
+    
+    # Fetch doctor info
+    doctor_name = "Doctor"
+    role = user.get("role", "doctor")
+    
+    if doctor_id:
+        doctor_result = client.table("doctors").select("name, role").eq("id", doctor_id).execute()
+        if doctor_result.data:
+            doctor_name = doctor_result.data[0]["name"]
+            # role from doctor table overrides user role if present, or we sync them. 
+            # For now let's use user role or doctor role.
+            # role = doctor_result.data[0].get("role", role)
+    
+    return {
+        "user_id": user["id"],
+        "username": username, # Added missing field
+        "clinic_id": target_clinic_id,
+        "clinic_name": clinic_name,
+        "doctor_id": doctor_id or "dr-default",
+        "doctor_name": doctor_name,
+        "role": role,
+    }
 
 
 # --- Intake Request (Token) Operations ---

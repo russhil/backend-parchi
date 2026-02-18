@@ -1,61 +1,35 @@
-"""
-Migration script to add missing columns to the Supabase patients table.
-Run this once to update your database schema.
-"""
-
+from database import get_supabase
+import sys
 import os
 from dotenv import load_dotenv
-from supabase import create_client
 
 load_dotenv()
 
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-
-if not SUPABASE_URL or not SUPABASE_KEY:
-    print("Error: SUPABASE_URL and SUPABASE_KEY not set in .env")
-    exit(1)
-
-try:
-    client = create_client(SUPABASE_URL, SUPABASE_KEY)
-    print("✓ Connected to Supabase")
-    
-    # Get the existing schema to see if columns need to be added
-    result = client.table("patients").select("*").limit(1).execute()
-    
-    if result.data:
-        patient = result.data[0]
-        has_phone = "phone" in patient
-        has_email = "email" in patient
-        has_address = "address" in patient
+def check_db():
+    print("Checking database connection...")
+    try:
+        client = get_supabase()
+        print("Connected to Supabase.")
         
-        print(f"Current columns in patients table:")
-        print(f"  - phone: {has_phone}")
-        print(f"  - email: {has_email}")
-        print(f"  - address: {has_address}")
-        
-        if not has_phone or not has_email or not has_address:
-            print("\n⚠️  Missing columns detected!")
-            print("You need to add these columns in your Supabase database.")
-            print("\n1. Go to https://supabase.com/dashboard")
-            print("2. Select your project")
-            print("3. Go to SQL Editor")
-            print("4. Create a new query and run this SQL:")
-            print("""
-ALTER TABLE patients
-ADD COLUMN IF NOT EXISTS phone TEXT,
-ADD COLUMN IF NOT EXISTS email TEXT,
-ADD COLUMN IF NOT EXISTS address TEXT;
+        # Check users table
+        print("Checking users table schema...")
+        res = client.table("users").select("*").limit(1).execute()
+        print(f"Users table check: Success. Found {len(res.data)} rows.")
+        if res.data:
+            print(f"Sample user: {res.data[0]}")
+            
+        # Check clinics table
+        print("Checking clinics table schema...")
+        res = client.table("clinics").select("*").limit(1).execute()
+        print(f"Clinics table check: Success. Found {len(res.data)} rows.")
 
-CREATE INDEX IF NOT EXISTS idx_patients_phone ON patients(phone);
-            """)
-        else:
-            print("\n✓ All required columns exist!")
-    else:
-        print("Could not check schema - no patients found, but table exists")
-        
-except Exception as e:
-    print(f"Error: {e}")
-    print("\nMake sure you have:")
-    print("1. Created a 'patients' table in Supabase")
-    print("2. Set SUPABASE_URL and SUPABASE_KEY in .env")
+        print("Database check complete.")
+        return True
+
+    except Exception as e:
+        print(f"Database check failed: {e}")
+        return False
+
+if __name__ == "__main__":
+    success = check_db()
+    sys.exit(0 if success else 1)

@@ -73,6 +73,7 @@ from database import (
     delete_patient,
     delete_appointment_retain,
     delete_appointment_purge,
+    get_doctor,
 )
 from supabase_storage import upload_file
 from prompts import (
@@ -2120,6 +2121,13 @@ def process_parchi(req: ParchiProcessRequest, x_clinic_id: str = Header(None), x
     results = []
     base_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
 
+    # Fetch doctor name for WhatsApp
+    doctor_name = "Doctor"
+    if x_doctor_id:
+        doc = get_doctor(x_doctor_id)
+        if doc and doc.get("name"):
+            doctor_name = doc["name"]
+
     for entry in req.entries:
         entry_result = {
             "name": entry.name,
@@ -2205,6 +2213,7 @@ def process_parchi(req: ParchiProcessRequest, x_clinic_id: str = Header(None), x
                 patient_name=entry.name,
                 appointment_time=display_time,
                 intake_link=intake_link,
+                doctor_name=doctor_name,
             )
             entry_result["whatsapp_sent"] = wa_result.get("success", False)
             if not wa_result.get("success"):

@@ -45,6 +45,17 @@ def get_patient(patient_id: str) -> Optional[dict]:
     return result.data[0] if result.data else None
 
 
+def get_doctor(doctor_id: str) -> Optional[dict]:
+    """Fetch a single doctor by ID."""
+    try:
+        client = get_supabase()
+        result = client.table("doctors").select("*").eq("id", doctor_id).execute()
+        return result.data[0] if result.data else None
+    except Exception as e:
+        print(f"Error fetching doctor: {str(e)}")
+        return None
+
+
 def get_all_patients(clinic_id: str) -> list[dict]:
     """Fetch all patients for a specific clinic."""
     client = get_supabase()

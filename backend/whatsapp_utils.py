@@ -83,22 +83,25 @@ def send_whatsapp_text(phone: str, message: str) -> dict:
         return {"success": False, "error": str(e)}
 
 
-def send_whatsapp_template(
+
+def send_confirmed_template(
     phone: str,
     customer_name: str,
+    doctor_name: str,
     appointment_date: str,
     appointment_time: str,
     intake_url_slug: str,
     image_id: str = "1997514164526776",
 ) -> dict:
     """
-    Send the 'appointment_confirmed' WhatsApp template message.
+    Send the 'confirmed' WhatsApp template message.
 
     Args:
         phone: Recipient phone in international format
-        customer_name: Patient's name (body param)
-        appointment_date: e.g. "February 26, 2026" (body param)
-        appointment_time: e.g. "3:00 PM" (body param)
+        customer_name: Patient's name (body param {{1}})
+        doctor_name: Doctor's name (body param {{2}})
+        appointment_date: e.g. "February 26, 2026" (body param {{3}})
+        appointment_time: e.g. "3:00 PM" (body param {{4}})
         intake_url_slug: Dynamic suffix for the button URL (the intake token UUID + trailing slash)
         image_id: WhatsApp media ID for the header image
     Returns:
@@ -123,7 +126,7 @@ def send_whatsapp_template(
         "to": clean_phone,
         "type": "template",
         "template": {
-            "name": "appointment_confirmed",
+            "name": "confirmed",
             "language": {"code": "en"},
             "components": [
                 {
@@ -136,6 +139,7 @@ def send_whatsapp_template(
                     "type": "body",
                     "parameters": [
                         {"type": "text", "parameter_name": "customer_name", "text": customer_name},
+                        {"type": "text", "parameter_name": "doctor", "text": doctor_name},
                         {"type": "text", "parameter_name": "appointment_date", "text": appointment_date},
                         {"type": "text", "parameter_name": "appointment_time", "text": appointment_time},
                     ],
@@ -176,16 +180,18 @@ def send_intake_whatsapp(
     patient_name: str,
     appointment_time: str,
     intake_link: str,
+    doctor_name: str,
 ) -> dict:
     """
     Send an appointment confirmation + intake link to a patient via WhatsApp
-    using the 'appointment_confirmed' template.
+    using the 'confirmed' template.
 
     Args:
         phone: Patient phone number
         patient_name: Patient's name
         appointment_time: Human-readable appointment time (e.g. "February 26, 2026 at 03:00 PM")
         intake_link: The unique intake form URL
+        doctor_name: Name of the doctor (e.g. "Simran")
     Returns:
         dict with 'success' and details
     """
@@ -202,9 +208,10 @@ def send_intake_whatsapp(
     if not slug.endswith("/"):
         slug += "/"
 
-    return send_whatsapp_template(
+    return send_confirmed_template(
         phone=phone,
         customer_name=patient_name,
+        doctor_name=doctor_name,
         appointment_date=date_part,
         appointment_time=time_part,
         intake_url_slug=slug,
